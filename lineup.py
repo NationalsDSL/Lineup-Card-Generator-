@@ -19,7 +19,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
 
 
-st.set_page_config(page_title="Lineup Manager", page_icon="LM", layout="wide")
+st.set_page_config(page_title="Lineup Manager", page_icon=":baseball:", layout="wide")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("LINEUP_DB_PATH", os.path.join(BASE_DIR, "baseball_app.db"))
@@ -117,24 +117,14 @@ def inject_styles():
     st.markdown(
         """
         <style>
-        @import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;600;700&family=Barlow+Condensed:wght@600;700&display=swap');
-
         :root {
             --ink: #102136;
-            --muted: #4f637a;
-            --card: #ffffff;
-            --line: #c9d8ea;
-            --accent: #0f5e88;
-            --accent-2: #15a0bf;
-            --ok: #0f9d58;
-            --warn: #b45309;
-            --danger: #be123c;
             --sidebar-1: #0f2740;
             --sidebar-2: #18466c;
         }
 
-        html, body, [class*="css"] {
-            font-family: "Barlow", sans-serif;
+        html, body, .stApp {
+            font-family: "Segoe UI", sans-serif;
         }
 
         [data-testid="stAppViewContainer"] {
@@ -145,7 +135,7 @@ def inject_styles():
             color: var(--ink);
         }
 
-        .main .block-container {
+        [data-testid="stAppViewContainer"] .main .block-container {
             max-width: 1240px;
             padding-top: 1.1rem;
             padding-bottom: 2rem;
@@ -158,7 +148,6 @@ def inject_styles():
 
         [data-testid="stSidebar"] * {
             color: #eef4ff !important;
-            font-family: "Barlow", sans-serif;
         }
 
         [data-testid="stSidebar"] [role="radiogroup"] label {
@@ -176,13 +165,11 @@ def inject_styles():
             transform: translateX(2px);
         }
 
-        .stMarkdown, .stText, .stDataFrame, .stMetric, .stCaption, .stAlert {
-            font-family: "Barlow", sans-serif !important;
+        .stMarkdown, .stText, .stCaption, .stAlert, p, li, label {
             color: var(--ink);
         }
 
         h1, h2, h3 {
-            font-family: "Barlow Condensed", sans-serif !important;
             letter-spacing: 0.3px;
             color: #0d2238;
         }
@@ -230,7 +217,6 @@ def inject_styles():
 
         [data-testid="stMetricValue"] {
             color: #0f2e4b;
-            font-family: "Barlow Condensed", sans-serif !important;
             font-weight: 700;
         }
 
@@ -267,6 +253,7 @@ def inject_styles():
             border: 1px solid #c8d7e8 !important;
             min-height: 42px;
             background: #ffffff !important;
+            color: var(--ink) !important;
         }
 
         label p {
@@ -299,12 +286,6 @@ def inject_styles():
             box-shadow: none !important;
         }
 
-        [data-testid="stHorizontalBlock"] > div:has(.stButton > button[kind="secondary"]) button {
-            background: #ffffff !important;
-            color: #153a5b !important;
-            border: 1px solid #c3d4e6 !important;
-        }
-
         .stCheckbox label p, .stRadio label p {
             font-weight: 600 !important;
         }
@@ -332,7 +313,7 @@ def inject_styles():
         }
 
         @media (max-width: 900px) {
-            .main .block-container {
+            [data-testid="stAppViewContainer"] .main .block-container {
                 padding-top: 0.6rem;
                 padding-left: 0.8rem;
                 padding-right: 0.8rem;
