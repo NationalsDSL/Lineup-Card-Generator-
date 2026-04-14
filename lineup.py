@@ -63,6 +63,10 @@ def init_db():
         )
         """
     )
+    cursor.execute("PRAGMA table_info(teams)")
+    team_columns = [row[1] for row in cursor.fetchall()]
+    if "logo_url" not in team_columns:
+        cursor.execute("ALTER TABLE teams ADD COLUMN logo_url TEXT")
 
     cursor.execute(
         """
@@ -456,6 +460,15 @@ def set_org_logo(short_name, logo_url):
     return org_id
 
 
+def set_team_logo(team_id, logo_url):
+    logo = str(logo_url).strip()
+    cursor.execute(
+        "UPDATE teams SET logo_url=? WHERE id=?",
+        (logo, int(team_id)),
+    )
+    conn.commit()
+
+
 def get_org_logo(short_name):
     org_short = str(short_name).strip()
     cursor.execute("SELECT logo_url FROM organizations WHERE short_name=?", (org_short,))
@@ -737,15 +750,26 @@ def get_teams():
             t.id,
             t.name AS team,
             o.short_name AS org,
-            o.logo_url AS logo_url,
+            t.logo_url AS team_logo_url,
+            o.logo_url AS org_logo_url,
+            COALESCE(NULLIF(TRIM(t.logo_url), ''), o.logo_url) AS logo_url,
             COUNT(p.id) AS player_count
         FROM teams t
         JOIN organizations o ON o.id = t.organization_id
         LEFT JOIN players p ON p.team_id = t.id
-        GROUP BY t.id, t.name, o.short_name, o.logo_url
+        GROUP BY t.id, t.name, t.logo_url, o.short_name, o.logo_url
         ORDER BY o.short_name, t.name
     """
     return pd.read_sql(query, conn)
+
+
+def find_optional_column(df, candidates):
+    normalized = {str(col).strip().lower(): col for col in df.columns}
+    for name in candidates:
+        key = str(name).strip().lower()
+        if key in normalized:
+            return normalized[key]
+    return None
 
 
 def get_roster(team_id):
@@ -2896,7 +2920,7 @@ def lineup_editor(side_key, team_row, roster, lineup_spots):
 st.sidebar.markdown("## Lineup Manager")
 menu = st.sidebar.radio(
     "Menu",
-    ["Import CSV", "Import Org Logos", "View Teams", "Create Lineup"],
+    ["Import CSV", "Import Logos", "View Teams", "Create Lineup"],
 )
 
 
@@ -3114,18 +3138,59 @@ if menu == "Import CSV":
                 )
 
 
-if menu == "Import Org Logos":
+if menu == "Import Logos":
     st.markdown(
         """
         <div class="hero">
-            <h1>Import Org Logos</h1>
-            <p>Upload a CSV with organization codes and PNG logo links.</p>
+            <h1>Import Logos</h1>
+            <p>Assign a logo to a specific team so it appears in lineup exports and previews.</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    st.caption("Expected columns example: org, logo_url")
+    teams_for_logo = get_teams()
+    if not teams_for_logo.empty:
+        teams_for_logo = teams_for_logo.copy()
+        teams_for_logo["label"] = teams_for_logo.apply(team_label, axis=1)
+        team_logo_options = teams_for_logo["id"].astype(int).tolist()
+        team_logo_labels = {
+            int(row["id"]): str(row["label"])
+            for _, row in teams_for_logo.iterrows()
+        }
+
+        st.markdown("##### Assign Logo to One Team")
+        with st.form("manual_team_logo_form", clear_on_submit=True):
+            selected_team_for_logo = st.selectbox(
+                "Team",
+                options=team_logo_options,
+                format_func=lambda team_id: team_logo_labels.get(int(team_id), str(team_id)),
+            )
+            manual_logo_url = st.text_input(
+                "Logo URL or local asset path",
+                placeholder="https://example.com/team-logo.png",
+            )
+            manual_logo_submit = st.form_submit_button(
+                "Save Team Logo",
+                type="primary",
+                use_container_width=True,
+            )
+            if manual_logo_submit:
+                if not str(manual_logo_url).strip():
+                    st.error("Enter a logo URL or local file path first.")
+                else:
+                    set_team_logo(selected_team_for_logo, manual_logo_url)
+                    selected_team_name = team_logo_labels.get(
+                        int(selected_team_for_logo),
+                        str(selected_team_for_logo),
+                    )
+                    st.success(f"Logo saved for team {selected_team_name}.")
+
+        st.markdown("---")
+    else:
+        st.info("Import a roster first so you can assign logos to existing teams.")
+
+    st.caption("CSV expected example: team, logo_url. Optional: org for more exact matching.")
     logo_csv = st.file_uploader("Upload Logo CSV", type=["csv"], key="org_logo_csv")
 
     if logo_csv:
@@ -3140,11 +3205,6 @@ if menu == "Import Org Logos":
         st.dataframe(df_logo.head(), use_container_width=True)
 
         try:
-            org_col = find_column(
-                df_logo,
-                ["org", "short_name", "organization", "currentorg"],
-                "organization",
-            )
             logo_col = find_column(
                 df_logo,
                 ["logo_url", "logo", "image_url", "image", "png", "url"],
@@ -3154,40 +3214,103 @@ if menu == "Import Org Logos":
             st.error(str(err))
             st.stop()
 
-        st.caption("Detected columns")
-        st.write({"organization": org_col, "logo_url": logo_col})
+        org_col = find_optional_column(
+            df_logo,
+            ["org", "short_name", "organization", "currentorg"],
+        )
+        team_col = find_optional_column(
+            df_logo,
+            ["team", "team_name", "currentteamname", "teamname"],
+        )
+        if not team_col and not org_col:
+            st.error("The logo CSV must include at least a team column or an organization column.")
+            st.stop()
 
+        st.caption("Detected columns")
+        st.write({"organization": org_col, "team": team_col, "logo_url": logo_col})
+
+        teams_catalog = get_teams()
+        logos_by_team = {}
         logos_by_org = {}
         skipped_missing = 0
+        skipped_unmatched = 0
 
         for _, row in df_logo.iterrows():
-            raw_org = row.get(org_col, "")
+            raw_org = row.get(org_col, "") if org_col else ""
+            raw_team = row.get(team_col, "") if team_col else ""
             raw_logo = row.get(logo_col, "")
 
-            if (
-                pd.isna(raw_org)
-                or not str(raw_org).strip()
-                or pd.isna(raw_logo)
-                or not str(raw_logo).strip()
-            ):
+            if pd.isna(raw_logo) or not str(raw_logo).strip():
                 skipped_missing += 1
                 continue
 
-            logos_by_org[str(raw_org).strip()] = str(raw_logo).strip()
+            logo_value = str(raw_logo).strip()
+            org_value = "" if pd.isna(raw_org) else str(raw_org).strip()
+            team_value = "" if pd.isna(raw_team) else str(raw_team).strip()
 
-        if not logos_by_org:
-            st.error("No valid org/logo rows found in CSV.")
+            if team_value:
+                team_matches = teams_catalog[
+                    teams_catalog["team"].astype(str).str.strip().eq(team_value)
+                ]
+                if org_value:
+                    team_matches = team_matches[
+                        team_matches["org"].astype(str).str.strip().eq(org_value)
+                    ]
+
+                if len(team_matches) == 1:
+                    team_id = int(team_matches.iloc[0]["id"])
+                    logos_by_team[team_id] = {
+                        "org": str(team_matches.iloc[0]["org"]),
+                        "team": str(team_matches.iloc[0]["team"]),
+                        "logo_url": logo_value,
+                    }
+                    continue
+
+                skipped_unmatched += 1
+                continue
+
+            if org_value:
+                logos_by_org[org_value] = logo_value
+                continue
+
+            skipped_missing += 1
+
+        if not logos_by_team and not logos_by_org:
+            st.error("No valid team/logo rows found in CSV.")
             st.stop()
 
-        detected_rows = pd.DataFrame(
-            [{"Organization": k, "Logo URL": v} for k, v in sorted(logos_by_org.items())]
-        )
-        st.caption("Logos to import (last value per org if repeated)")
+        detected_rows = []
+        for _, payload in sorted(logos_by_team.items(), key=lambda item: (item[1]["org"], item[1]["team"])):
+            detected_rows.append(
+                {
+                    "Target Type": "Team",
+                    "Organization": payload["org"],
+                    "Team": payload["team"],
+                    "Logo URL": payload["logo_url"],
+                }
+            )
+        for org_short, logo_url in sorted(logos_by_org.items()):
+            detected_rows.append(
+                {
+                    "Target Type": "Organization",
+                    "Organization": org_short,
+                    "Team": "",
+                    "Logo URL": logo_url,
+                }
+            )
+
+        detected_rows = pd.DataFrame(detected_rows)
+        st.caption("Logos to import")
         st.dataframe(detected_rows, use_container_width=True, hide_index=True)
 
-        if st.button("Import Org logos", type="primary"):
+        if st.button("Import logos", type="primary"):
             created_orgs = 0
-            updated_logos = 0
+            updated_org_logos = 0
+            updated_team_logos = 0
+
+            for team_id, payload in logos_by_team.items():
+                set_team_logo(team_id, payload["logo_url"])
+                updated_team_logos += 1
 
             for org_short, logo_url in logos_by_org.items():
                 cursor.execute(
@@ -3198,26 +3321,34 @@ if menu == "Import Org Logos":
                 set_org_logo(org_short, logo_url)
                 if not existed:
                     created_orgs += 1
-                updated_logos += 1
+                updated_org_logos += 1
 
             st.success(
-                f"Logos imported: {updated_logos}. "
+                f"Team logos imported: {updated_team_logos}. "
+                f"Organization logos imported: {updated_org_logos}. "
                 f"New organizations created: {created_orgs}. "
-                f"Skipped rows: {skipped_missing}."
+                f"Skipped missing rows: {skipped_missing}. "
+                f"Skipped unmatched teams: {skipped_unmatched}."
             )
 
-            orgs_with_logo = pd.read_sql(
+            logos_configured = pd.read_sql(
                 """
-                SELECT short_name AS Organization, logo_url AS `Logo URL`
-                FROM organizations
-                WHERE COALESCE(TRIM(logo_url), '') <> ''
-                ORDER BY short_name
+                SELECT
+                    o.short_name AS Organization,
+                    t.name AS Team,
+                    t.logo_url AS `Team Logo URL`,
+                    o.logo_url AS `Organization Logo URL`,
+                    COALESCE(NULLIF(TRIM(t.logo_url), ''), o.logo_url) AS `Logo In Use`
+                FROM teams t
+                JOIN organizations o ON o.id = t.organization_id
+                WHERE COALESCE(NULLIF(TRIM(t.logo_url), ''), o.logo_url, '') <> ''
+                ORDER BY o.short_name, t.name
                 """,
                 conn,
             )
-            if not orgs_with_logo.empty:
-                st.caption("Organizations with logo configured")
-                st.dataframe(orgs_with_logo, use_container_width=True, hide_index=True)
+            if not logos_configured.empty:
+                st.caption("Configured logos by team")
+                st.dataframe(logos_configured, use_container_width=True, hide_index=True)
 
 
 if menu == "View Teams":
@@ -3273,7 +3404,7 @@ if menu == "View Teams":
     if logo_url:
         st.image(logo_url, width=120)
     else:
-        st.caption(f"No logo configured for organization {selected_team['org']}.")
+        st.caption(f"No logo configured for team {selected_team['org']} | {selected_team['team']}.")
 
     team_id = int(selected_team["id"])
     st.markdown("##### Edit Roster")
