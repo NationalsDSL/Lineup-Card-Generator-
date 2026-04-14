@@ -359,6 +359,7 @@ def normalize_hand(value):
 FIELD_POSITION_OPTIONS = ["C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "DH", "EH", "P"]
 LINEUP_POSITION_OPTIONS = ["C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "DH", "EH"]
 MAX_EXTRA_LIST_ENTRIES = 16
+MAX_MANUAL_EXTRA_ENTRIES = 6
 POSITION_NORMALIZATION_MAP = {
     "C": "C",
     "1B": "1B",
@@ -615,6 +616,9 @@ def apply_saved_lineup_to_session(side_key, team_id, player_ids, lineup_spots):
         if pid is None or pid not in valid_player_ids or pid in extra_player_ids:
             continue
         extra_player_ids.append(pid)
+    st.session_state[f"{side_key}_{team_id}_extra_player_ids"] = [
+        int(pid) for pid in extra_player_ids[:MAX_EXTRA_LIST_ENTRIES]
+    ]
     st.session_state[f"{side_key}_{team_id}_extra_players_count"] = min(
         MAX_EXTRA_LIST_ENTRIES,
         len(extra_player_ids),
@@ -630,12 +634,62 @@ def apply_saved_lineup_to_session(side_key, team_id, player_ids, lineup_spots):
         if pid is None or pid not in valid_player_ids or pid in extra_pitcher_ids:
             continue
         extra_pitcher_ids.append(pid)
+    st.session_state[f"{side_key}_{team_id}_extra_pitcher_ids"] = [
+        int(pid) for pid in extra_pitcher_ids[:MAX_EXTRA_LIST_ENTRIES]
+    ]
     st.session_state[f"{side_key}_{team_id}_extra_pitchers_count"] = min(
         MAX_EXTRA_LIST_ENTRIES,
         len(extra_pitcher_ids),
     )
     for idx, pid in enumerate(extra_pitcher_ids[:MAX_EXTRA_LIST_ENTRIES], start=1):
         st.session_state[f"{side_key}_{team_id}_extra_pitcher_{idx}"] = int(pid)
+
+    manual_extra_players = payload.get("manual_extra_players", [])
+    if not isinstance(manual_extra_players, list):
+        manual_extra_players = []
+    st.session_state[f"{side_key}_{team_id}_manual_extra_players_count"] = min(
+        MAX_MANUAL_EXTRA_ENTRIES,
+        len(manual_extra_players),
+    )
+    for idx, record in enumerate(manual_extra_players[:MAX_MANUAL_EXTRA_ENTRIES], start=1):
+        if not isinstance(record, dict):
+            continue
+        st.session_state[f"{side_key}_{team_id}_manual_extra_player_name_{idx}"] = str(
+            record.get("name", "")
+        ).strip()
+        st.session_state[f"{side_key}_{team_id}_manual_extra_player_pos_{idx}"] = normalize_position_choice(
+            record.get("primary_position", "DH")
+        )
+        bats_value = normalize_hand(record.get("bats", "-"))
+        throws_value = normalize_hand(record.get("throws", "-"))
+        st.session_state[f"{side_key}_{team_id}_manual_extra_player_bats_{idx}"] = (
+            bats_value if bats_value in {"R", "L", "S"} else "-"
+        )
+        st.session_state[f"{side_key}_{team_id}_manual_extra_player_throws_{idx}"] = (
+            throws_value if throws_value in {"R", "L", "S"} else "-"
+        )
+
+    manual_extra_pitchers = payload.get("manual_extra_pitchers", [])
+    if not isinstance(manual_extra_pitchers, list):
+        manual_extra_pitchers = []
+    st.session_state[f"{side_key}_{team_id}_manual_extra_pitchers_count"] = min(
+        MAX_MANUAL_EXTRA_ENTRIES,
+        len(manual_extra_pitchers),
+    )
+    for idx, record in enumerate(manual_extra_pitchers[:MAX_MANUAL_EXTRA_ENTRIES], start=1):
+        if not isinstance(record, dict):
+            continue
+        st.session_state[f"{side_key}_{team_id}_manual_extra_pitcher_name_{idx}"] = str(
+            record.get("name", "")
+        ).strip()
+        throws_value = normalize_hand(record.get("throws", "-"))
+        bats_value = normalize_hand(record.get("bats", "-"))
+        st.session_state[f"{side_key}_{team_id}_manual_extra_pitcher_throws_{idx}"] = (
+            throws_value if throws_value in {"R", "L", "S"} else "-"
+        )
+        st.session_state[f"{side_key}_{team_id}_manual_extra_pitcher_bats_{idx}"] = (
+            bats_value if bats_value in {"R", "L", "S"} else "-"
+        )
 
 
 def build_lineup_export_key(game_date, away_team_id, home_team_id, away_state, home_state):
@@ -2508,6 +2562,48 @@ def build_mlb_official_lineup_pdf(
 
 
 def lineup_editor(side_key, team_row, roster, lineup_spots):
+    def keyed_selectbox(label, options, key, default_value, **kwargs):
+        normalized_options = list(options)
+        if not normalized_options:
+            raise ValueError(f"No options available for widget '{label}'.")
+        if st.session_state.get(key) not in normalized_options:
+            fallback = default_value if default_value in normalized_options else normalized_options[0]
+            st.session_state[key] = fallback
+        return st.selectbox(label, options=normalized_options, key=key, **kwargs)
+
+    def keyed_checkbox(label, key, default_value=False, **kwargs):
+        if key not in st.session_state:
+            st.session_state[key] = bool(default_value)
+        return st.checkbox(label, key=key, **kwargs)
+
+    def keyed_text_input(label, key, default_value="", **kwargs):
+        if key not in st.session_state:
+            st.session_state[key] = str(default_value)
+        return st.text_input(label, key=key, **kwargs)
+
+    def keyed_multiselect(label, options, key, default_values=None, **kwargs):
+        normalized_options = list(options)
+        desired = list(default_values or [])
+        filtered_desired = []
+        for value in desired:
+            if value in normalized_options and value not in filtered_desired:
+                filtered_desired.append(value)
+
+        current_values = st.session_state.get(key)
+        if not isinstance(current_values, list):
+            st.session_state[key] = filtered_desired
+        else:
+            filtered_current = []
+            for value in current_values:
+                if value in normalized_options and value not in filtered_current:
+                    filtered_current.append(value)
+            st.session_state[key] = filtered_current
+
+        return st.multiselect(label, options=normalized_options, key=key, **kwargs)
+
+    def manual_extra_count_options():
+        return list(range(0, MAX_MANUAL_EXTRA_ENTRIES + 1))
+
     header_left, header_right = st.columns([4, 1])
     with header_left:
         st.markdown(f"#### {side_key}: {format_team_name(team_row)}")
@@ -2551,7 +2647,7 @@ def lineup_editor(side_key, team_row, roster, lineup_spots):
         apply_saved_lineup_to_session(side_key, team_id, player_ids, lineup_spots)
         st.session_state[hydrated_team_key] = int(team_id)
 
-    st.caption("Batting order (activa SUB o NOTE junto al jugador si aplica)")
+    st.caption("Batting order. Enable SUB or NOTE for a player when needed.")
     lineup_positions = []
     sub_ui_placeholders = {}
     note_ui_placeholders = {}
@@ -2571,11 +2667,11 @@ def lineup_editor(side_key, team_row, roster, lineup_spots):
         with row_num_col:
             st.markdown(f"**#{spot}**")
         with row_select_col:
-            selected_id = st.selectbox(
+            selected_id = keyed_selectbox(
                 f"#{spot}",
-                options=available,
-                index=default_index,
                 key=key,
+                options=available,
+                default_value=available[default_index],
                 format_func=player_option,
                 label_visibility="collapsed",
             )
@@ -2597,30 +2693,32 @@ def lineup_editor(side_key, team_row, roster, lineup_spots):
             current_pos = "DH"
 
         with row_pos_col:
-            selected_pos = st.selectbox(
+            selected_pos = keyed_selectbox(
                 f"Pos #{spot}",
-                options=LINEUP_POSITION_OPTIONS,
-                index=LINEUP_POSITION_OPTIONS.index(current_pos),
                 key=pos_key,
+                options=LINEUP_POSITION_OPTIONS,
+                default_value=current_pos,
                 label_visibility="collapsed",
             )
 
         note_toggle_key = f"{side_key}_{team_id}_note_enabled_{spot}"
         with row_note_col:
-            st.checkbox(
+            keyed_checkbox(
                 f"NOTE #{spot}",
                 key=note_toggle_key,
+                default_value=False,
                 label_visibility="collapsed",
-                help=f"Activar nota manual para #{spot}",
+                help=f"Enable a manual note for #{spot}",
             )
 
         toggle_key = f"{side_key}_{team_id}_sub_enabled_{spot}"
         with row_sub_col:
-            st.checkbox(
+            keyed_checkbox(
                 f"SUB #{spot}",
                 key=toggle_key,
+                default_value=False,
                 label_visibility="collapsed",
-                help=f"Activar sustitucion para #{spot}",
+                help=f"Enable a substitution for #{spot}",
             )
 
         # Placeholders to render note/sub controls directly below this player row.
@@ -2633,9 +2731,9 @@ def lineup_editor(side_key, team_row, roster, lineup_spots):
     duplicated_positions = sorted({p for p in lineup_positions if lineup_positions.count(p) > 1})
     if duplicated_positions:
         st.error(
-            "Posiciones repetidas en el lineup: "
+            "Duplicate positions in the lineup: "
             + ", ".join(duplicated_positions)
-            + ". Cada posicion debe ser unica."
+            + ". Each position must be unique."
         )
 
     pitcher_pool = roster[
@@ -2648,11 +2746,11 @@ def lineup_editor(side_key, team_row, roster, lineup_spots):
     if current_pitcher not in player_ids:
         current_pitcher = default_pitcher
 
-    pitcher_id = st.selectbox(
+    pitcher_id = keyed_selectbox(
         "Starting Pitcher",
-        options=player_ids,
-        index=player_ids.index(int(current_pitcher)),
         key=pitcher_key,
+        options=player_ids,
+        default_value=int(current_pitcher),
         format_func=player_option,
     )
 
@@ -2678,11 +2776,11 @@ def lineup_editor(side_key, team_row, roster, lineup_spots):
             note_text_key = f"{side_key}_{team_id}_note_text_{idx}"
             if note_slot:
                 with note_slot.container():
-                    manual_note_text = st.text_input(
-                        f"Nota #{idx}",
+                    manual_note_text = keyed_text_input(
+                        f"Note #{idx}",
                         key=note_text_key,
-                        value=str(st.session_state.get(note_text_key, "")),
-                        placeholder="Escribe una nota para CHANGE",
+                        default_value=str(st.session_state.get(note_text_key, "")),
+                        placeholder="Write a note for CHANGE",
                     ).strip()
             else:
                 manual_note_text = str(st.session_state.get(note_text_key, "")).strip()
@@ -2706,8 +2804,8 @@ def lineup_editor(side_key, team_row, roster, lineup_spots):
                 if sub_slot:
                     with sub_slot.container():
                         st.error(
-                            f"No hay jugadores disponibles para sustitucion en #{idx}. "
-                            "Apaga una sustitucion previa o agrega mas jugadores al roster."
+                            f"No players are available for substitution at #{idx}. "
+                            "Disable an earlier substitution or add more players to the roster."
                         )
                 substitution_valid = False
                 note_parts.append("SUB PEND")
@@ -2724,22 +2822,25 @@ def lineup_editor(side_key, team_row, roster, lineup_spots):
 
             if sub_slot:
                 with sub_slot.container():
-                    st.caption(f"#{idx} {starter_name} - Sustitucion")
+                    st.caption(f"#{idx} {starter_name} - Substitution")
                     sub_col1, sub_col2 = st.columns([0.72, 0.28], gap="small")
                     with sub_col1:
-                        sub_player_id = st.selectbox(
-                            f"Sustituto #{idx}",
-                            options=available_subs,
-                            index=0 if current_sub_player not in available_subs else available_subs.index(current_sub_player),
+                        sub_player_id = keyed_selectbox(
+                            f"Substitute #{idx}",
                             key=sub_player_key,
+                            options=available_subs,
+                            default_value=available_subs[
+                                0 if current_sub_player not in available_subs else available_subs.index(current_sub_player)
+                            ],
                             format_func=player_option,
                         )
                     inning_key = f"{side_key}_{team_id}_sub_inning_{idx}"
                     with sub_col2:
-                        sub_inning = st.selectbox(
+                        sub_inning = keyed_selectbox(
                             f"Inning #{idx}",
-                            options=list(range(1, 12)),
                             key=inning_key,
+                            options=list(range(1, 12)),
+                            default_value=st.session_state.get(inning_key, 1),
                         )
             else:
                 sub_player_id = available_subs[
@@ -2788,51 +2889,35 @@ def lineup_editor(side_key, team_row, roster, lineup_spots):
     max_extra_players = min(MAX_EXTRA_LIST_ENTRIES, len(extra_player_candidates))
 
     no_extra_players_key = f"{side_key}_{team_id}_no_extra_players"
-    no_present_extra_players = st.checkbox(
-        "No presentar Extra Players",
-        value=(max_extra_players == 0),
+    no_present_extra_players = keyed_checkbox(
+        "Hide Extra Players",
         key=no_extra_players_key,
+        default_value=(max_extra_players == 0),
         disabled=(max_extra_players == 0),
     )
 
     extra_players_selected_ids = []
     extra_players_records = []
     if not no_present_extra_players:
-        extra_players_count = st.number_input(
-            "Cantidad Extra Players",
-            min_value=0,
-            max_value=max_extra_players,
-            value=min(2, max_extra_players),
-            step=1,
-            key=f"{side_key}_{team_id}_extra_players_count",
-        )
-
-        for idx in range(1, int(extra_players_count) + 1):
-            extra_key = f"{side_key}_{team_id}_extra_player_{idx}"
-            current_extra = st.session_state.get(extra_key)
-            available_extra = [
-                pid
-                for pid in extra_player_candidates
-                if pid not in extra_players_selected_ids or pid == current_extra
-            ]
-            if not available_extra:
-                break
-
-            if current_extra in available_extra:
-                default_index = available_extra.index(current_extra)
-            else:
-                default_index = min(idx - 1, len(available_extra) - 1)
-
-            selected_extra = st.selectbox(
-                f"Extra Player #{idx}",
-                options=available_extra,
-                index=default_index,
-                key=extra_key,
+        extra_player_ids_key = f"{side_key}_{team_id}_extra_player_ids"
+        extra_player_button_col1, extra_player_button_col2 = st.columns([0.32, 0.68], gap="small")
+        with extra_player_button_col1:
+            if st.button("Select All Extra Players", key=f"{side_key}_{team_id}_select_all_extra_players"):
+                st.session_state[extra_player_ids_key] = [int(pid) for pid in extra_player_candidates]
+        extra_players_selected_ids = [
+            int(pid)
+            for pid in keyed_multiselect(
+                "Select roster extra players",
+                options=extra_player_candidates,
+                key=extra_player_ids_key,
+                default_values=[],
                 format_func=player_option,
+                help="Choose the specific roster position players you want to include in Extra Players.",
             )
-            extra_players_selected_ids.append(int(selected_extra))
-
-        extra_players_records = []
+        ]
+        st.caption(
+            f"{len(extra_players_selected_ids)} roster extra player(s) selected."
+        )
         for player_id in extra_players_selected_ids:
             p = player_map[int(player_id)]
             extra_players_records.append(
@@ -2843,6 +2928,54 @@ def lineup_editor(side_key, team_row, roster, lineup_spots):
                     "throws": str(p["throws"]),
                 }
             )
+
+        with st.expander("Add outside-roster extra players"):
+            manual_extra_players_count = keyed_selectbox(
+                "Manual Extra Players",
+                options=manual_extra_count_options(),
+                key=f"{side_key}_{team_id}_manual_extra_players_count",
+                default_value=0,
+                help="Add extra position players who are not in this roster.",
+            )
+            for idx in range(1, int(manual_extra_players_count) + 1):
+                st.caption(f"Manual Extra Player #{idx}")
+                c1, c2, c3, c4 = st.columns([0.42, 0.20, 0.19, 0.19], gap="small")
+                with c1:
+                    manual_name = keyed_text_input(
+                        f"Manual Extra Player Name #{idx}",
+                        key=f"{side_key}_{team_id}_manual_extra_player_name_{idx}",
+                        default_value="",
+                    ).strip()
+                with c2:
+                    manual_pos = keyed_selectbox(
+                        f"Manual Extra Player Position #{idx}",
+                        options=FIELD_POSITION_OPTIONS,
+                        key=f"{side_key}_{team_id}_manual_extra_player_pos_{idx}",
+                        default_value="DH",
+                    )
+                with c3:
+                    manual_bats = keyed_selectbox(
+                        f"Manual Extra Player Bats #{idx}",
+                        options=["R", "L", "S", "-"],
+                        key=f"{side_key}_{team_id}_manual_extra_player_bats_{idx}",
+                        default_value="-",
+                    )
+                with c4:
+                    manual_throws = keyed_selectbox(
+                        f"Manual Extra Player Throws #{idx}",
+                        options=["R", "L", "S", "-"],
+                        key=f"{side_key}_{team_id}_manual_extra_player_throws_{idx}",
+                        default_value="-",
+                    )
+                if manual_name:
+                    extra_players_records.append(
+                        {
+                            "name": manual_name,
+                            "primary_position": str(manual_pos),
+                            "bats": str(manual_bats),
+                            "throws": str(manual_throws),
+                        }
+                    )
 
     st.markdown("---")
     st.markdown("##### Extra Pitchers")
@@ -2857,51 +2990,35 @@ def lineup_editor(side_key, team_row, roster, lineup_spots):
     max_extra_pitchers = min(MAX_EXTRA_LIST_ENTRIES, len(extra_pitcher_candidates))
 
     no_extra_pitchers_key = f"{side_key}_{team_id}_no_extra_pitchers"
-    no_present_extra_pitchers = st.checkbox(
-        "No presentar Extra Pitchers",
-        value=(max_extra_pitchers == 0),
+    no_present_extra_pitchers = keyed_checkbox(
+        "Hide Extra Pitchers",
         key=no_extra_pitchers_key,
+        default_value=(max_extra_pitchers == 0),
         disabled=(max_extra_pitchers == 0),
     )
 
     extra_pitchers_selected_ids = []
     extra_pitchers_records = []
     if not no_present_extra_pitchers:
-        extra_pitchers_count = st.number_input(
-            "Cantidad Extra Pitchers",
-            min_value=0,
-            max_value=max_extra_pitchers,
-            value=min(2, max_extra_pitchers),
-            step=1,
-            key=f"{side_key}_{team_id}_extra_pitchers_count",
-        )
-
-        for idx in range(1, int(extra_pitchers_count) + 1):
-            extra_pitcher_key = f"{side_key}_{team_id}_extra_pitcher_{idx}"
-            current_extra_pitcher = st.session_state.get(extra_pitcher_key)
-            available_extra_pitchers = [
-                pid
-                for pid in extra_pitcher_candidates
-                if pid not in extra_pitchers_selected_ids or pid == current_extra_pitcher
-            ]
-            if not available_extra_pitchers:
-                break
-
-            if current_extra_pitcher in available_extra_pitchers:
-                default_index = available_extra_pitchers.index(current_extra_pitcher)
-            else:
-                default_index = min(idx - 1, len(available_extra_pitchers) - 1)
-
-            selected_extra_pitcher = st.selectbox(
-                f"Extra Pitcher #{idx}",
-                options=available_extra_pitchers,
-                index=default_index,
-                key=extra_pitcher_key,
+        extra_pitcher_ids_key = f"{side_key}_{team_id}_extra_pitcher_ids"
+        extra_pitcher_button_col1, extra_pitcher_button_col2 = st.columns([0.32, 0.68], gap="small")
+        with extra_pitcher_button_col1:
+            if st.button("Select All Extra Pitchers", key=f"{side_key}_{team_id}_select_all_extra_pitchers"):
+                st.session_state[extra_pitcher_ids_key] = [int(pid) for pid in extra_pitcher_candidates]
+        extra_pitchers_selected_ids = [
+            int(pid)
+            for pid in keyed_multiselect(
+                "Select roster extra pitchers",
+                options=extra_pitcher_candidates,
+                key=extra_pitcher_ids_key,
+                default_values=[],
                 format_func=player_option,
+                help="Choose the specific roster pitchers you want to include in Extra Pitchers.",
             )
-            extra_pitchers_selected_ids.append(int(selected_extra_pitcher))
-
-        extra_pitchers_records = []
+        ]
+        st.caption(
+            f"{len(extra_pitchers_selected_ids)} roster extra pitcher(s) selected."
+        )
         for player_id in extra_pitchers_selected_ids:
             p = player_map[int(player_id)]
             extra_pitchers_records.append(
@@ -2913,6 +3030,68 @@ def lineup_editor(side_key, team_row, roster, lineup_spots):
                 }
             )
 
+        with st.expander("Add outside-roster extra pitchers"):
+            manual_extra_pitchers_count = keyed_selectbox(
+                "Manual Extra Pitchers",
+                options=manual_extra_count_options(),
+                key=f"{side_key}_{team_id}_manual_extra_pitchers_count",
+                default_value=0,
+                help="Add extra pitchers who are not in this roster.",
+            )
+            for idx in range(1, int(manual_extra_pitchers_count) + 1):
+                st.caption(f"Manual Extra Pitcher #{idx}")
+                c1, c2, c3 = st.columns([0.56, 0.22, 0.22], gap="small")
+                with c1:
+                    manual_name = keyed_text_input(
+                        f"Manual Extra Pitcher Name #{idx}",
+                        key=f"{side_key}_{team_id}_manual_extra_pitcher_name_{idx}",
+                        default_value="",
+                    ).strip()
+                with c2:
+                    manual_bats = keyed_selectbox(
+                        f"Manual Extra Pitcher Bats #{idx}",
+                        options=["R", "L", "S", "-"],
+                        key=f"{side_key}_{team_id}_manual_extra_pitcher_bats_{idx}",
+                        default_value="-",
+                    )
+                with c3:
+                    manual_throws = keyed_selectbox(
+                        f"Manual Extra Pitcher Throws #{idx}",
+                        options=["R", "L", "S", "-"],
+                        key=f"{side_key}_{team_id}_manual_extra_pitcher_throws_{idx}",
+                        default_value="-",
+                    )
+                if manual_name:
+                    extra_pitchers_records.append(
+                        {
+                            "name": manual_name,
+                            "primary_position": "P",
+                            "bats": str(manual_bats),
+                            "throws": str(manual_throws),
+                        }
+                    )
+
+    manual_extra_players_payload = [
+        {
+            "name": str(record.get("name", "")).strip(),
+            "primary_position": str(record.get("primary_position", "")).strip(),
+            "bats": str(record.get("bats", "")).strip(),
+            "throws": str(record.get("throws", "")).strip(),
+        }
+        for record in extra_players_records[len(extra_players_selected_ids):]
+        if str(record.get("name", "")).strip()
+    ]
+    manual_extra_pitchers_payload = [
+        {
+            "name": str(record.get("name", "")).strip(),
+            "primary_position": str(record.get("primary_position", "P")).strip() or "P",
+            "bats": str(record.get("bats", "")).strip(),
+            "throws": str(record.get("throws", "")).strip(),
+        }
+        for record in extra_pitchers_records[len(extra_pitchers_selected_ids):]
+        if str(record.get("name", "")).strip()
+    ]
+
     save_payload = {
         "lineup_ids": [int(pid) for pid in lineup_ids],
         "lineup_positions": [str(pos) for pos in lineup_positions],
@@ -2922,6 +3101,8 @@ def lineup_editor(side_key, team_row, roster, lineup_spots):
         "note_texts": [str(text) for text in manual_note_texts],
         "extra_player_ids": [int(pid) for pid in extra_players_selected_ids],
         "extra_pitcher_ids": [int(pid) for pid in extra_pitchers_selected_ids],
+        "manual_extra_players": manual_extra_players_payload,
+        "manual_extra_pitchers": manual_extra_pitchers_payload,
         "no_present_extra_players": bool(no_present_extra_players),
         "no_present_extra_pitchers": bool(no_present_extra_pitchers),
     }
@@ -2948,22 +3129,22 @@ def lineup_editor(side_key, team_row, roster, lineup_spots):
 st.sidebar.markdown("## Lineup Manager")
 menu = st.sidebar.radio(
     "Menu",
-    ["Import CSV", "Import Logos", "View Teams", "Create Lineup"],
+    ["Import Roster", "Import Logos", "View Teams", "Create Lineup"],
 )
 
 
-if menu == "Import CSV":
+if menu == "Import Roster":
     st.markdown(
         """
         <div class="hero">
-            <h1>Import Roster CSV</h1>
+            <h1>Import Roster</h1>
             <p>Load team data and save players directly into the database.</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
+    uploaded_file = st.file_uploader("Upload Roster", type=["csv"])
 
     if uploaded_file:
         df = pd.read_csv(uploaded_file)
@@ -3080,7 +3261,7 @@ if menu == "Import CSV":
             ),
         )
 
-        if st.button("Import CSV into database", type="primary"):
+        if st.button("Import Roster into Database", type="primary"):
             team_cache = {}
             inserted = 0
             duplicates = 0
@@ -3145,7 +3326,7 @@ if menu == "Import CSV":
 
             if replace_existing:
                 st.success(
-                    f"Rosters replaced for {deleted_existing} team(s), then imported from CSV."
+                    f"Rosters replaced for {deleted_existing} team(s), then imported from the uploaded roster."
                 )
 
             if per_team_inserted:
@@ -3409,7 +3590,7 @@ if menu == "View Teams":
 
     teams = get_teams()
     if teams.empty:
-        st.warning("No teams available yet. Import a CSV first.")
+        st.warning("No teams available yet. Import a roster first.")
         st.stop()
 
     total_players = int(teams["player_count"].sum())
@@ -3468,7 +3649,7 @@ if menu == "View Teams":
         with add_col4:
             new_player_throws = st.selectbox("Throws", options=["R", "L", "S"])
 
-        add_submit = st.form_submit_button("Agregar jugador", type="primary", use_container_width=True)
+        add_submit = st.form_submit_button("Add Player", type="primary", use_container_width=True)
         if add_submit:
             ok, message = add_player_to_team(
                 team_id=team_id,
@@ -3506,7 +3687,7 @@ if menu == "View Teams":
         delete_col1, delete_col2 = st.columns([0.74, 0.26], gap="small")
         with delete_col1:
             delete_player_id = st.selectbox(
-                "Eliminar jugador del roster",
+                "Remove player from roster",
                 options=delete_ids,
                 key=f"delete_pick_{team_id}",
                 format_func=lambda pid: delete_map.get(int(pid), str(pid)),
@@ -3514,14 +3695,14 @@ if menu == "View Teams":
         with delete_col2:
             st.write("")
             st.write("")
-            if st.button("Eliminar", key=f"delete_player_btn_{team_id}", use_container_width=True):
+            if st.button("Remove", key=f"delete_player_btn_{team_id}", use_container_width=True):
                 deleted = delete_player_from_team(team_id, int(delete_player_id))
                 if deleted:
                     st.success(f"Jugador eliminado: {delete_map.get(int(delete_player_id), '')}")
                     st.session_state[view_team_key] = int(team_id)
                     st.rerun()
                 else:
-                    st.error("No se pudo eliminar el jugador.")
+                    st.error("Could not remove the player.")
 
         st.markdown("##### Lineup Usage by Player")
         filter_col1, filter_col2, filter_col3 = st.columns([0.36, 0.32, 0.32], gap="small")
