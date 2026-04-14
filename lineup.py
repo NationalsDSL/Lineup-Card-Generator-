@@ -23,6 +23,8 @@ st.set_page_config(page_title="Lineup Manager", page_icon=":baseball:", layout="
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("LINEUP_DB_PATH", os.path.join(BASE_DIR, "baseball_app.db"))
+TEAM_LOGO_UPLOAD_DIR = os.path.join(BASE_DIR, "uploads", "team_logos")
+SUPPORTED_LOGO_EXTENSIONS = {"png", "jpg", "jpeg", "webp", "bmp", "gif"}
 MLB_LOGO_URL = (
     "https://a.espncdn.com/combiner/i?img=/i/teamlogos/leagues/500/mlb.png"
     "&w=400&h=400&transparent=true"
@@ -31,6 +33,8 @@ DSL_LOGO_URL = "https://brandeps.com/logo-download/D/Dominican-Summer-League-log
 MLB_LOGO_FILE = os.path.join(BASE_DIR, "assets", "logos", "png", "league_mlb.png")
 DSL_LOGO_FILE = os.path.join(BASE_DIR, "assets", "logos", "png", "league_dsl.png")
 OFFICIAL_FORM_FONT_CACHE = None
+
+os.makedirs(TEAM_LOGO_UPLOAD_DIR, exist_ok=True)
 
 
 conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
@@ -467,6 +471,30 @@ def set_team_logo(team_id, logo_url):
         (logo, int(team_id)),
     )
     conn.commit()
+
+
+def save_uploaded_team_logo(team_id, uploaded_file):
+    original_name = str(getattr(uploaded_file, "name", "") or "").strip()
+    extension = os.path.splitext(original_name)[1].lower().lstrip(".")
+    if extension not in SUPPORTED_LOGO_EXTENSIONS:
+        raise ValueError(
+            "Unsupported image type. Use png, jpg, jpeg, webp, bmp, or gif."
+        )
+
+    uploaded_file.seek(0)
+    content = uploaded_file.read()
+    if not content:
+        raise ValueError("The uploaded image file is empty.")
+
+    digest = hashlib.sha1(content).hexdigest()[:12]
+    filename = f"team_{int(team_id)}_{digest}.{extension}"
+    absolute_path = os.path.join(TEAM_LOGO_UPLOAD_DIR, filename)
+    with open(absolute_path, "wb") as output_file:
+        output_file.write(content)
+
+    relative_path = os.path.relpath(absolute_path, BASE_DIR).replace("\\", "/")
+    set_team_logo(team_id, relative_path)
+    return relative_path
 
 
 def get_org_logo(short_name):
@@ -3170,21 +3198,38 @@ if menu == "Import Logos":
                 "Logo URL or local asset path",
                 placeholder="https://example.com/team-logo.png",
             )
+            manual_logo_file = st.file_uploader(
+                "Or upload an image file",
+                type=sorted(SUPPORTED_LOGO_EXTENSIONS),
+                key="manual_team_logo_file",
+            )
+            st.caption("Supported uploads: png, jpg, jpeg, webp, bmp, gif.")
             manual_logo_submit = st.form_submit_button(
                 "Save Team Logo",
                 type="primary",
                 use_container_width=True,
             )
             if manual_logo_submit:
-                if not str(manual_logo_url).strip():
-                    st.error("Enter a logo URL or local file path first.")
-                else:
+                selected_team_name = team_logo_labels.get(
+                    int(selected_team_for_logo),
+                    str(selected_team_for_logo),
+                )
+                if manual_logo_file is not None:
+                    try:
+                        saved_logo_path = save_uploaded_team_logo(
+                            selected_team_for_logo,
+                            manual_logo_file,
+                        )
+                        st.success(
+                            f"Image uploaded for team {selected_team_name}: {saved_logo_path}"
+                        )
+                    except ValueError as err:
+                        st.error(str(err))
+                elif str(manual_logo_url).strip():
                     set_team_logo(selected_team_for_logo, manual_logo_url)
-                    selected_team_name = team_logo_labels.get(
-                        int(selected_team_for_logo),
-                        str(selected_team_for_logo),
-                    )
                     st.success(f"Logo saved for team {selected_team_name}.")
+                else:
+                    st.error("Enter a logo URL/path or upload an image file first.")
 
         st.markdown("---")
     else:
