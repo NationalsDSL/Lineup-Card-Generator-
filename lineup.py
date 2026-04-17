@@ -32,6 +32,16 @@ MLB_LOGO_URL = (
 DSL_LOGO_URL = "https://brandeps.com/logo-download/D/Dominican-Summer-League-logo-01.png"
 MLB_LOGO_FILE = os.path.join(BASE_DIR, "assets", "logos", "png", "league_mlb.png")
 DSL_LOGO_FILE = os.path.join(BASE_DIR, "assets", "logos", "png", "league_dsl.png")
+MANAGER_SIGNATURE_FILE = os.path.join(
+    BASE_DIR,
+    "assets",
+    "signatures",
+    "manager_signature.png",
+)
+MANAGER_SIGNATURE_FILES = {
+    "Sandy Martinez": MANAGER_SIGNATURE_FILE,
+}
+DEFAULT_MANAGER_SIGNATURE_NAME = "Sandy Martinez"
 OFFICIAL_FORM_FONT_CACHE = None
 
 os.makedirs(TEAM_LOGO_UPLOAD_DIR, exist_ok=True)
@@ -422,6 +432,25 @@ def get_pitcher_row_color_by_throw(throws):
     return "#000000"
 
 
+def get_print_hand_color(hand):
+    normalized = normalize_hand(hand)
+    if normalized == "L":
+        return "#dc2626"
+    if normalized == "S":
+        return "#0ea5e9"
+    if normalized == "R":
+        return "#000000"
+    return "#111827"
+
+
+def get_short_hand_code(hand, mode):
+    normalized = normalize_hand(hand)
+    if normalized not in {"L", "R", "S"}:
+        return "-"
+    suffix = "HH" if mode == "players" else "HP"
+    return f"{normalized}{suffix}"
+
+
 def find_column(df, candidates, label):
     normalized_cols = [(col, col.lower().strip()) for col in df.columns]
 
@@ -806,6 +835,56 @@ def load_logo_reader(logo_url):
         return None
     except Exception:
         return None
+
+
+def draw_signature_image(pdf, signature_reader, line_x1, line_x2, line_y, max_height):
+    if not signature_reader:
+        return
+    try:
+        img_w, img_h = signature_reader.getSize()
+    except Exception:
+        return
+    if not img_w or not img_h:
+        return
+
+    line_length = max(1, float(line_x2 - line_x1))
+    aspect_ratio = float(img_w) / float(img_h)
+    target_h = float(max_height)
+    target_w = target_h * aspect_ratio
+    max_w = line_length * 0.5
+    if target_w > max_w:
+        target_w = max_w
+        target_h = target_w / aspect_ratio
+
+    draw_x = line_x1 + ((line_length - target_w) / 2)
+    draw_y = line_y - (target_h * 0.02)
+    pdf.drawImage(
+        signature_reader,
+        draw_x,
+        draw_y,
+        width=target_w,
+        height=target_h,
+        preserveAspectRatio=True,
+        mask="auto",
+    )
+
+
+def get_available_manager_signature_names():
+    return [
+        name
+        for name, path in MANAGER_SIGNATURE_FILES.items()
+        if path and os.path.exists(path)
+    ]
+
+
+def load_manager_signature_reader(manager_name, enabled=True):
+    if not enabled:
+        return None
+    selected_name = str(manager_name or "").strip() or DEFAULT_MANAGER_SIGNATURE_NAME
+    signature_path = MANAGER_SIGNATURE_FILES.get(selected_name)
+    if not signature_path:
+        return None
+    return load_logo_reader(signature_path)
 
 
 def get_or_create_team(team_name, org_id):
@@ -1196,17 +1275,30 @@ def draw_pdf_scoreboard(pdf, x, y_bottom, width, away_name, home_name, away_logo
 
 def build_extra_lines(extra_records, no_present_flag, mode):
     if no_present_flag:
-        return ["NO PRESENTAR"]
+        return [{"text": "NO PRESENTAR", "hand": "-"}]
     if not extra_records:
-        return ["-"]
+        return [{"text": "-", "hand": "-"}]
 
     if mode == "players":
         return [
-            f"{idx}. {p['name'][:24]} ({p['primary_position']})"
+            {
+                "text": (
+                    f"{idx}. {str(p.get('name', ''))[:18]} "
+                    f"({str(p.get('primary_position', '-'))[:4]} | "
+                    f"{get_short_hand_code(p.get('bats', '-'), mode='players')})"
+                ),
+                "hand": str(p.get("bats", "-")),
+            }
             for idx, p in enumerate(extra_records, start=1)
         ]
     return [
-        f"{idx}. {p['name'][:24]} (T:{p['throws']})"
+        {
+            "text": (
+                f"{idx}. {str(p.get('name', ''))[:19]} "
+                f"({get_short_hand_code(p.get('throws', '-'), mode='pitchers')})"
+            ),
+            "hand": str(p.get("throws", "-")),
+        }
         for idx, p in enumerate(extra_records, start=1)
     ]
 
@@ -1257,10 +1349,14 @@ def draw_pdf_extra_block(
         right_idx = row_idx + split_index
 
         if left_idx < len(lines):
-            left_text = str(lines[left_idx])[:text_max]
+            left_row = lines[left_idx]
+            left_text = str(left_row.get("text", "-"))[:text_max]
+            pdf.setFillColor(colors.HexColor(get_print_hand_color(left_row.get("hand", "-"))))
             pdf.drawString(content_x, y_cursor + 3, left_text)
         if right_idx < len(lines):
-            right_text = str(lines[right_idx])[:text_max]
+            right_row = lines[right_idx]
+            right_text = str(right_row.get("text", "-"))[:text_max]
+            pdf.setFillColor(colors.HexColor(get_print_hand_color(right_row.get("hand", "-"))))
             pdf.drawString(right_x, y_cursor + 3, right_text)
 
     return y_bottom
@@ -1268,20 +1364,31 @@ def draw_pdf_extra_block(
 
 def build_umpire_extra_rows(extra_records, no_present_flag, mode):
     if no_present_flag:
-        return [("NO PRESENTAR", "-", "-")]
+        return [{"name": "NO PRESENTAR", "right": "-", "note": "-", "hand": "-"}]
     if not extra_records:
-        return [("-", "-", "-")]
+        return [{"name": "-", "right": "-", "note": "-", "hand": "-"}]
 
     rows = []
     for record in extra_records:
         name = str(record.get("name", "-")).strip() or "-"
         if mode == "players":
-            right = str(record.get("primary_position", "-")).strip() or "-"
+            position = str(record.get("primary_position", "-")).strip() or "-"
+            display_name = f"{name[:20]} ({position[:4]})"
+            hand_value = str(record.get("bats", "-")).strip().upper()
+            right = get_short_hand_code(hand_value, mode="players")
         else:
-            throw_hand = str(record.get("throws", "-")).strip().upper()
-            right = f"{throw_hand}HP" if throw_hand in {"L", "R", "S"} else "-"
+            display_name = name[:24]
+            hand_value = str(record.get("throws", "-")).strip().upper()
+            right = get_short_hand_code(hand_value, mode="pitchers")
         note = str(record.get("notes", "-")).strip() or "-"
-        rows.append((name, right, note))
+        rows.append(
+            {
+                "name": display_name,
+                "right": right,
+                "note": note,
+                "hand": hand_value,
+            }
+        )
     return rows
 
 
@@ -1304,7 +1411,9 @@ def draw_umpire_lineup_block(
     no_present_extra_pitchers,
     copy_index,
     team_logo=None,
+    dsl_logo=None,
     mlb_logo=None,
+    manager_signature=None,
 ):
     y_bottom = y_top - height
     header_h = 40
@@ -1357,11 +1466,22 @@ def draw_umpire_lineup_block(
     pdf.drawCentredString(header_center_x, y_top - 20, "Official Batting Order")
     pdf.setFont("Helvetica", 7.0)
     pdf.drawCentredString(header_center_x, y_top - 28, f"Date: {date_text}")
-
-    pdf.setFont("Helvetica-Bold", 6.9)
-    pdf.drawRightString(x + width - 5, y_top - 12, f"COPY {copy_index}")
-    pdf.setFont("Helvetica-Bold", 6.7)
-    pdf.drawRightString(x + width - 5, y_top - 20, team_name[:22])
+    pdf.setFont("Helvetica", 6.4)
+    pdf.drawCentredString(header_center_x, y_top - 35, str(team_name)[:26])
+    if dsl_logo:
+        dsl_logo_w = 26
+        dsl_logo_h = 26
+        dsl_logo_x = x + width - dsl_logo_w - 10
+        dsl_logo_y = y_top - header_h + ((header_h - dsl_logo_h) / 2)
+        pdf.drawImage(
+            dsl_logo,
+            dsl_logo_x,
+            dsl_logo_y,
+            width=dsl_logo_w,
+            height=dsl_logo_h,
+            preserveAspectRatio=True,
+            mask="auto",
+        )
 
     content_top = y_top - header_h
     content_bottom = y_bottom + signature_h + bottom_pad
@@ -1468,32 +1588,46 @@ def draw_umpire_lineup_block(
     lineup_rows_data = []
     for idx, player in enumerate(lineup_records, start=1):
         lineup_rows_data.append(
-            (
-                str(idx),
-                str(player["name"]),
-                str(player["primary_position"]),
-                str(player.get("notes", "-")),
-            )
+            {
+                "slot": str(idx),
+                "name": str(player["name"]),
+                "position": str(player["primary_position"]),
+                "note": str(player.get("notes", "-")),
+                "hand": str(player.get("bats", "-")),
+            }
         )
     lineup_rows_data.append(
-        (
-            "SP",
-            str(pitcher_record["name"]),
-            "SP",
-            str(pitcher_record.get("notes", "-")),
-        )
+        {
+            "slot": "SP",
+            "name": str(pitcher_record["name"]),
+            "position": "SP",
+            "note": str(pitcher_record.get("notes", "-")),
+            "hand": str(pitcher_record.get("throws", "-")),
+        }
     )
 
     for idx, row_data in enumerate(lineup_rows_data):
         row_top = lineup_rows_top - (idx * lineup_row_h)
-        y_text = row_top - lineup_row_h + 2
-        pdf.setFillColor(colors.black)
+        y_text = row_top - lineup_row_h + max(2.5, lineup_row_h * 0.2)
+        name_max_font = max(8.6, min(11.8, lineup_row_h * 0.92))
+        name_min_font = max(7.8, min(9.6, name_max_font))
+        pdf.setFillColor(colors.HexColor(get_print_hand_color(row_data.get("hand", "-"))))
         pdf.setFont("Helvetica-Bold", 8.8)
-        pdf.drawCentredString(x + (num_w / 2), y_text, row_data[0][:3])
-        pdf.drawString(x_num_end + 3, y_text, row_data[1][:31])
-        pdf.drawCentredString(x_name_end + (pos_w / 2), y_text, row_data[2][:4])
+        pdf.drawCentredString(x + (num_w / 2), y_text, row_data["slot"][:3])
+        draw_fitted_text(
+            pdf,
+            x_num_end + 2,
+            y_text,
+            row_data["name"],
+            "Helvetica-Bold",
+            max_font_size=name_max_font,
+            min_font_size=name_min_font,
+            max_width=name_w - 4,
+        )
+        pdf.drawCentredString(x_name_end + (pos_w / 2), y_text, row_data["position"][:4])
+        pdf.setFillColor(colors.black)
         pdf.setFont("Helvetica", 7.9)
-        pdf.drawString(x_pos_end + 2, y_text, row_data[3][:11])
+        pdf.drawString(x_pos_end + 2, y_text, row_data["note"][:11])
 
     def draw_extra_section(section_top, rows_top, rows_bottom, title, rows, first_number):
         pdf.setFillColor(colors.HexColor("#b91c1c"))
@@ -1532,19 +1666,32 @@ def draw_umpire_lineup_block(
 
         for idx, row in enumerate(rows_to_draw):
             row_top = rows_top - (idx * row_h2)
-            y_text = row_top - row_h2 + 2
-            label_left = str(row[0])[:28]
-            label_right = str(row[1])[:5]
-            label_note = str(row[2])[:11]
+            y_text = row_top - row_h2 + max(2.0, row_h2 * 0.2)
+            name_max_font = max(6.8, min(9.4, row_h2 * 1.02))
+            name_min_font = max(6.1, min(7.8, name_max_font))
+            label_left = str(row.get("name", "-"))
+            label_right = str(row.get("right", "-"))[:5]
+            label_note = str(row.get("note", "-"))[:11]
             row_number = ""
             if label_left not in {"-", "NO PRESENTAR"}:
                 row_number = str(first_number + idx)
 
-            pdf.setFillColor(colors.black)
+            row_color = colors.HexColor(get_print_hand_color(row.get("hand", "-")))
+            pdf.setFillColor(row_color)
             pdf.setFont("Helvetica-Bold", 7.8)
             pdf.drawCentredString(x + (num_w2 / 2), y_text, row_number)
-            pdf.drawString(x_num_end2 + 3, y_text, label_left)
+            draw_fitted_text(
+                pdf,
+                x_num_end2 + 2,
+                y_text,
+                label_left,
+                "Helvetica-Bold",
+                max_font_size=name_max_font,
+                min_font_size=name_min_font,
+                max_width=name_w2 - 4,
+            )
             pdf.drawCentredString(x_name_end2 + (right_w2 / 2), y_text, label_right)
+            pdf.setFillColor(colors.black)
             pdf.setFont("Helvetica", 7.4)
             pdf.drawString(x_right_end2 + 2, y_text, label_note)
 
@@ -1560,7 +1707,13 @@ def draw_umpire_lineup_block(
 
     extra_pitchers_start = extra_players_start + max(
         0,
-        len([r for r in extra_players_rows if str(r[0]) not in {"-", "NO PRESENTAR"}]),
+        len(
+            [
+                r
+                for r in extra_players_rows
+                if str(r.get("name", "-")) not in {"-", "NO PRESENTAR"}
+            ]
+        ),
     )
     draw_extra_section(
         section_top=pitchers_section_top,
@@ -1581,6 +1734,14 @@ def draw_umpire_lineup_block(
     pdf.setLineWidth(0.6)
     pdf.line(left_x1, sig_line_y, left_x2, sig_line_y)
     pdf.line(right_x1, sig_line_y, right_x2, sig_line_y)
+    draw_signature_image(
+        pdf,
+        manager_signature,
+        left_x1,
+        left_x2,
+        sig_line_y,
+        max_height=20,
+    )
     pdf.setFillColor(colors.black)
     pdf.setFont("Helvetica", 6.7)
     pdf.drawString(left_x1, y_bottom + 2, "Manager Signature")
@@ -1600,6 +1761,7 @@ def build_umpire_pdf(
     selected_extra_pitchers,
     selected_no_present_extra_players,
     selected_no_present_extra_pitchers,
+    manager_signature_reader=None,
 ):
     buffer = BytesIO()
     pdf = canvas.Canvas(buffer, pagesize=landscape(legal))
@@ -1637,6 +1799,7 @@ def build_umpire_pdf(
     pdf.restoreState()
 
     selected_logo = load_logo_reader(selected_logo_url)
+    dsl_logo = load_logo_reader(DSL_LOGO_FILE) or load_logo_reader(DSL_LOGO_URL)
     mlb_logo = load_logo_reader(MLB_LOGO_FILE) or load_logo_reader(MLB_LOGO_URL)
     copy_index = 1
     block_top = height - margin
@@ -1661,7 +1824,9 @@ def build_umpire_pdf(
             no_present_extra_pitchers=selected_no_present_extra_pitchers,
             copy_index=copy_index,
             team_logo=selected_logo,
+            dsl_logo=dsl_logo,
             mlb_logo=mlb_logo,
+            manager_signature=manager_signature_reader,
         )
         copy_index += 1
 
@@ -1689,6 +1854,7 @@ def build_game_pdf(
     home_extra_pitchers,
     home_no_present_extra_players,
     home_no_present_extra_pitchers,
+    manager_signature_reader=None,
 ):
     buffer = BytesIO()
     pdf = canvas.Canvas(buffer, pagesize=letter)
@@ -2007,6 +2173,26 @@ def build_official_hand_groups(records, hand_key, columns):
     return grouped
 
 
+def official_hand_group_row_count(grouped_rows):
+    columns = list((grouped_rows or {}).keys())
+    if not columns:
+        return 0
+    return max([len(grouped_rows.get(col, [])) for col in columns] + [0])
+
+
+def compact_names_to_fixed_rows(values, max_rows):
+    normalized = [str(value).strip() for value in (values or []) if str(value).strip()]
+    if len(normalized) <= max_rows:
+        return normalized
+
+    compacted = normalized[:max_rows]
+    overflow = normalized[max_rows:]
+    for idx, value in enumerate(overflow):
+        target_idx = idx % max_rows
+        compacted[target_idx] = f"{compacted[target_idx]} / {value}"
+    return compacted
+
+
 def draw_centered_text(pdf, x_center, y, text, font_name, font_size, char_space=0):
     content = str(text)
     text_obj = pdf.beginText()
@@ -2222,6 +2408,14 @@ def draw_official_scoreboard(
         pdf.line(x_line, y_bottom, x_line, y_top)
 
     pdf.setFillColor(colors.black)
+    draw_centered_text(
+        pdf,
+        x + (first_col / 2),
+        y_top - row_h + 6,
+        "TEAM",
+        bold_font_name,
+        10.8,
+    )
     for idx, header in enumerate(headers):
         header_center_x = x + first_col + (idx * small_w) + (small_w / 2)
         draw_centered_text(pdf, header_center_x, y_top - row_h + 6, header, bold_font_name, 10.0)
@@ -2241,17 +2435,18 @@ def draw_official_hand_block(
     grouped_rows,
     min_rows,
     header_colors,
+    compact_overflow=False,
     font_name="Helvetica",
     bold_font_name="Helvetica-Bold",
 ):
+    fixed_rows = 6
     title_gap = 18
     column_header_h = 15
     box_top = y_top - title_gap
     y_bottom = box_top - height
     columns = list(grouped_rows.keys())
     col_w = width / max(1, len(columns))
-    max_group_size = max([len(grouped_rows.get(col, [])) for col in columns] + [0])
-    total_rows = max(min_rows, max_group_size if max_group_size > 0 else 0)
+    total_rows = fixed_rows
     row_h = (height - column_header_h) / max(1, total_rows)
 
     pdf.setFillColor(colors.black)
@@ -2275,19 +2470,42 @@ def draw_official_hand_block(
         pdf.setFillColor(colors.HexColor(header_colors.get(column, "#2f2f2f")))
         draw_centered_text(pdf, header_x, box_top - 12, column, font_name, 7.7)
 
-        pdf.setFillColor(colors.black)
+        pdf.setFillColor(colors.HexColor(header_colors.get(column, "#202020")))
         values = grouped_rows.get(column, [])
+        if compact_overflow:
+            values = compact_names_to_fixed_rows(values, fixed_rows)
+        else:
+            values = values[:fixed_rows]
         for row_index in range(total_rows):
             if row_index >= len(values):
                 continue
             row_top = box_top - column_header_h - (row_index * row_h)
-            baseline = row_top - row_h + max(4, (row_h * 0.2))
-            pdf.setFont(font_name, 8.0)
-            pdf.drawString(
-                x + (idx * col_w) + 3,
-                baseline,
-                truncate_text(values[row_index].upper(), 16),
-            )
+            baseline = row_top - row_h + max(4.8, (row_h * 0.34))
+            max_font_size = max(6.8, min(11.8, row_h * 0.96))
+            min_font_size = max(6.0, min(8.6, max_font_size))
+            cell_text = str(values[row_index]).upper()
+            if "/" in cell_text:
+                draw_fitted_text(
+                    pdf,
+                    x + (idx * col_w) + 2,
+                    baseline,
+                    cell_text,
+                    bold_font_name,
+                    max_font_size=max_font_size,
+                    min_font_size=min_font_size,
+                    max_width=col_w - 4,
+                )
+            else:
+                draw_centered_fitted_text(
+                    pdf,
+                    x + (idx * col_w) + (col_w / 2),
+                    baseline,
+                    cell_text,
+                    bold_font_name,
+                    max_font_size=max_font_size,
+                    min_font_size=min_font_size,
+                    max_width=col_w - 6,
+                )
 
 
 def build_mlb_official_lineup_pdf(
@@ -2310,6 +2528,7 @@ def build_mlb_official_lineup_pdf(
     home_no_present_extra_pitchers,
     game_number="",
     venue_text="",
+    manager_signature_reader=None,
 ):
     buffer = BytesIO()
     pdf = canvas.Canvas(buffer, pagesize=legal)
@@ -2393,7 +2612,7 @@ def build_mlb_official_lineup_pdf(
     main_top = height - 134
     gap = 10
     team_width = (width - (2 * margin) - gap) / 2
-    main_height = 438
+    main_height = 426
 
     draw_official_team_table(
         pdf,
@@ -2423,13 +2642,13 @@ def build_mlb_official_lineup_pdf(
     )
 
     position_colors = {
-        "LEFT-HANDED": "#9a3412",
-        "SWITCH": "#4c1d95",
-        "RIGHT-HANDED": "#0f4c81",
+        "LEFT-HANDED": "#dc2626",
+        "SWITCH": "#0ea5e9",
+        "RIGHT-HANDED": "#000000",
     }
     pitcher_colors = {
-        "LEFT-HANDED": "#9a3412",
-        "RIGHT-HANDED": "#0f4c81",
+        "LEFT-HANDED": "#dc2626",
+        "RIGHT-HANDED": "#000000",
     }
 
     away_position_groups = build_official_hand_groups(
@@ -2453,11 +2672,12 @@ def build_mlb_official_lineup_pdf(
         columns=["LEFT-HANDED", "RIGHT-HANDED"],
     )
 
-    lower_top = main_top - 30 - main_height
-    players_h = 114
-    pitchers_h = 92
+    lower_top = main_top - 24 - main_height
+    unified_hand_table_h = 122
+    players_h = unified_hand_table_h
+    pitchers_h = unified_hand_table_h
     players_box_top = lower_top - 18
-    pitchers_top = lower_top - 26 - players_h
+    pitchers_top = lower_top - 24 - players_h
     pitchers_box_top = pitchers_top - 18
     lower_boxes_bottom = pitchers_box_top - pitchers_h
 
@@ -2491,6 +2711,7 @@ def build_mlb_official_lineup_pdf(
         grouped_rows=away_position_groups,
         min_rows=5,
         header_colors=position_colors,
+        compact_overflow=False,
         font_name=official_font,
         bold_font_name=official_bold_font,
     )
@@ -2504,6 +2725,7 @@ def build_mlb_official_lineup_pdf(
         grouped_rows=home_position_groups,
         min_rows=5,
         header_colors=position_colors,
+        compact_overflow=False,
         font_name=official_font,
         bold_font_name=official_bold_font,
     )
@@ -2518,6 +2740,7 @@ def build_mlb_official_lineup_pdf(
         grouped_rows=away_pitcher_groups,
         min_rows=4,
         header_colors=pitcher_colors,
+        compact_overflow=True,
         font_name=official_font,
         bold_font_name=official_bold_font,
     )
@@ -2531,11 +2754,12 @@ def build_mlb_official_lineup_pdf(
         grouped_rows=home_pitcher_groups,
         min_rows=4,
         header_colors=pitcher_colors,
+        compact_overflow=True,
         font_name=official_font,
         bold_font_name=official_bold_font,
     )
 
-    scoreboard_y = 34
+    scoreboard_y = 56
     draw_official_scoreboard(
         pdf,
         x=margin,
@@ -2547,13 +2771,23 @@ def build_mlb_official_lineup_pdf(
         bold_font_name=official_bold_font,
     )
 
-    signature_y = 18
+    signature_y = 26
     pdf.setStrokeColor(colors.HexColor("#2b2b2b"))
     pdf.setLineWidth(0.8)
-    pdf.line(margin + 158, signature_y, width - margin - 104, signature_y)
+    signature_x1 = margin + 172
+    signature_x2 = width - margin - 104
+    pdf.line(signature_x1, signature_y, signature_x2, signature_y)
+    draw_signature_image(
+        pdf,
+        manager_signature_reader,
+        signature_x1,
+        signature_x2,
+        signature_y,
+        max_height=58,
+    )
     pdf.setFillColor(colors.black)
     pdf.setFont(official_font, 8.9)
-    pdf.drawString(margin, signature_y + 4, "MANAGER SIGNATURE")
+    pdf.drawString(margin + 18, signature_y + 4, "MANAGER SIGNATURE")
 
     pdf.showPage()
     pdf.save()
@@ -3995,6 +4229,30 @@ if menu == "Create Lineup":
         umpire_selected_no_present_extra_players = umpire_selected[8]
         umpire_selected_no_present_extra_pitchers = umpire_selected[9]
 
+    available_manager_signatures = get_available_manager_signature_names()
+    signature_controls_col1, signature_controls_col2 = st.columns([0.34, 0.66], gap="large")
+    with signature_controls_col1:
+        include_manager_signature = st.checkbox(
+            "Include manager signature",
+            value=False,
+            key="include_manager_signature",
+            disabled=(len(available_manager_signatures) == 0),
+        )
+    manager_signature_name = DEFAULT_MANAGER_SIGNATURE_NAME
+    with signature_controls_col2:
+        if include_manager_signature and available_manager_signatures:
+            manager_signature_name = st.selectbox(
+                "Manager signature",
+                options=available_manager_signatures,
+                index=0,
+                key="manager_signature_name",
+            )
+    selected_manager_signature_reader = load_manager_signature_reader(
+        manager_signature_name,
+        enabled=include_manager_signature,
+    )
+
+    if regular_exports_ready:
         umpire_pdf_bytes = build_umpire_pdf(
             game_date=game_date,
             umpire=umpire,
@@ -4008,6 +4266,7 @@ if menu == "Create Lineup":
             selected_extra_pitchers=umpire_selected_extra_pitchers,
             selected_no_present_extra_players=umpire_selected_no_present_extra_players,
             selected_no_present_extra_pitchers=umpire_selected_no_present_extra_pitchers,
+            manager_signature_reader=selected_manager_signature_reader,
         )
 
     away_official_payload = (
@@ -4054,6 +4313,7 @@ if menu == "Create Lineup":
         home_no_present_extra_pitchers=home_official_payload["no_present_extra_pitchers"],
         game_number=official_game_number,
         venue_text=official_venue,
+        manager_signature_reader=selected_manager_signature_reader,
     )
     umpire_filename = None
     if regular_exports_ready:
