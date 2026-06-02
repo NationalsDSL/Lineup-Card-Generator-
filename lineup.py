@@ -96,6 +96,10 @@ def init_db():
         )
         """
     )
+    cursor.execute("PRAGMA table_info(players)")
+    player_columns = [row[1] for row in cursor.fetchall()]
+    if "jersey_number" not in player_columns:
+        cursor.execute("ALTER TABLE players ADD COLUMN jersey_number TEXT")
 
     cursor.execute(
         """
@@ -364,6 +368,26 @@ def normalize_hand(value):
     if hand in {"L", "R", "S"}:
         return hand
     return "-"
+
+
+def normalize_jersey_number(value):
+    if value is None or pd.isna(value):
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    text = text.lstrip("#").strip()
+    if text.endswith(".0") and text[:-2].isdigit():
+        text = text[:-2]
+    return re.sub(r"[^A-Za-z0-9-]", "", text)[:6]
+
+
+def player_display_name(record):
+    name = str(record.get("name", "")).strip()
+    jersey_number = normalize_jersey_number(record.get("jersey_number", ""))
+    if jersey_number:
+        return f"{name} #{jersey_number}"
+    return name
 
 
 FIELD_POSITION_OPTIONS = ["C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "DH", "EH", "P"]
@@ -935,7 +959,7 @@ def find_optional_column(df, candidates):
 
 def get_roster(team_id):
     query = """
-        SELECT id, name, primary_position, bats, throws
+        SELECT id, name, jersey_number, primary_position, bats, throws
         FROM players
         WHERE team_id = ?
         ORDER BY name
@@ -943,7 +967,7 @@ def get_roster(team_id):
     return pd.read_sql(query, conn, params=(team_id,))
 
 
-def add_player_to_team(team_id, name, primary_position, bats, throws):
+def add_player_to_team(team_id, name, jersey_number, primary_position, bats, throws):
     team_id = int(team_id)
     clean_name = str(name).strip()
     if not clean_name:
@@ -954,6 +978,7 @@ def add_player_to_team(team_id, name, primary_position, bats, throws):
         return False, "Player name is invalid."
 
     position = normalize_position_choice(primary_position)
+    jersey_value = normalize_jersey_number(jersey_number)
     bats_value = normalize_hand(bats)
     throws_value = normalize_hand(throws)
     if bats_value == "-" or throws_value == "-":
@@ -968,13 +993,56 @@ def add_player_to_team(team_id, name, primary_position, bats, throws):
 
     cursor.execute(
         """
-        INSERT INTO players (name, normalized_name, team_id, primary_position, bats, throws)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO players (name, normalized_name, team_id, jersey_number, primary_position, bats, throws)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (clean_name, normalized, team_id, position, bats_value, throws_value),
+        (clean_name, normalized, team_id, jersey_value, position, bats_value, throws_value),
     )
     conn.commit()
     return True, "Player added."
+
+
+def update_roster_player(team_id, player_id, name, jersey_number, primary_position, bats, throws):
+    team_id = int(team_id)
+    player_id = int(player_id)
+    clean_name = str(name).strip()
+    if not clean_name:
+        return False, "Player name is required."
+
+    normalized = normalize_name(clean_name)
+    if not normalized:
+        return False, "Player name is invalid."
+
+    cursor.execute(
+        "SELECT id FROM players WHERE normalized_name=? AND team_id=? AND id<>?",
+        (normalized, team_id, player_id),
+    )
+    if cursor.fetchone():
+        return False, f"Duplicate player name: {clean_name}"
+
+    bats_value = normalize_hand(bats)
+    throws_value = normalize_hand(throws)
+    if bats_value == "-" or throws_value == "-":
+        return False, f"Bats and Throws are required for {clean_name}."
+
+    cursor.execute(
+        """
+        UPDATE players
+        SET name=?, normalized_name=?, jersey_number=?, primary_position=?, bats=?, throws=?
+        WHERE id=? AND team_id=?
+        """,
+        (
+            clean_name,
+            normalized,
+            normalize_jersey_number(jersey_number),
+            normalize_position_choice(primary_position),
+            bats_value,
+            throws_value,
+            player_id,
+            team_id,
+        ),
+    )
+    return cursor.rowcount > 0, "Player updated."
 
 
 def delete_player_from_team(team_id, player_id):
@@ -1008,11 +1076,12 @@ def roster_table_for_ui(roster):
     return roster.rename(
         columns={
             "name": "Player",
+            "jersey_number": "#",
             "primary_position": "Pos",
             "bats": "B",
             "throws": "T",
         }
-    )[["Player", "Pos", "B", "T"]]
+    )[["Player", "#", "Pos", "B", "T"]]
 
 
 def lineup_records_from_ids(lineup_ids, lineup_positions, lineup_notes, player_map):
@@ -1025,6 +1094,7 @@ def lineup_records_from_ids(lineup_ids, lineup_positions, lineup_notes, player_m
         records.append(
             {
                 "name": str(player["name"]),
+                "jersey_number": normalize_jersey_number(player.get("jersey_number", "")),
                 "primary_position": str(lineup_positions[idx]),
                 "bats": str(player["bats"]),
                 "throws": str(player["throws"]),
@@ -1049,7 +1119,7 @@ def lineup_preview_df(team_name, lineup_records, pitcher_record):
         rows.append(
             {
                 "#": idx,
-                "Player": player["name"],
+                "Player": player_display_name(player),
                 "Pos": player["primary_position"],
                 "B": player["bats"],
                 "T": player["throws"],
@@ -1060,7 +1130,7 @@ def lineup_preview_df(team_name, lineup_records, pitcher_record):
     rows.append(
         {
             "#": "P",
-            "Player": pitcher_record["name"],
+            "Player": player_display_name(pitcher_record),
             "Pos": "SP",
             "B": pitcher_record["bats"],
             "T": pitcher_record["throws"],
@@ -1158,6 +1228,7 @@ def draw_pdf_team_block(
             {
                 "slot": str(idx),
                 "name": str(player["name"]),
+                "jersey_number": normalize_jersey_number(player.get("jersey_number", "")),
                 "primary_position": str(player["primary_position"]),
                 "bats": str(player["bats"]),
                 "throws": str(player["throws"]),
@@ -1169,6 +1240,7 @@ def draw_pdf_team_block(
         {
             "slot": "P",
             "name": str(pitcher_record["name"]),
+            "jersey_number": normalize_jersey_number(pitcher_record.get("jersey_number", "")),
             "primary_position": "SP",
             "bats": str(pitcher_record["bats"]),
             "throws": str(pitcher_record["throws"]),
@@ -1190,7 +1262,7 @@ def draw_pdf_team_block(
         pdf.setFillColor(row_color)
         pdf.setFont("Helvetica-Bold", 9)
         pdf.drawCentredString(x + (num_w / 2), y_main, row["slot"])
-        pdf.drawString(x_num_end + 4, y_main, row["name"][:28])
+        pdf.drawString(x_num_end + 4, y_main, player_display_name(row)[:28])
         pdf.drawCentredString(x_name_end + (pos_w / 2), y_main, row["primary_position"][:4])
 
         note_text = row.get("notes", "-")
@@ -1283,7 +1355,7 @@ def build_extra_lines(extra_records, no_present_flag, mode):
         return [
             {
                 "text": (
-                    f"{idx}. {str(p.get('name', ''))[:18]} "
+                    f"{idx}. {player_display_name(p)[:18]} "
                     f"({str(p.get('primary_position', '-'))[:4]} | "
                     f"{get_short_hand_code(p.get('bats', '-'), mode='players')})"
                 ),
@@ -1294,7 +1366,7 @@ def build_extra_lines(extra_records, no_present_flag, mode):
     return [
         {
             "text": (
-                f"{idx}. {str(p.get('name', ''))[:19]} "
+                f"{idx}. {player_display_name(p)[:19]} "
                 f"({get_short_hand_code(p.get('throws', '-'), mode='pitchers')})"
             ),
             "hand": str(p.get("throws", "-")),
@@ -1370,7 +1442,7 @@ def build_umpire_extra_rows(extra_records, no_present_flag, mode):
 
     rows = []
     for record in extra_records:
-        name = str(record.get("name", "-")).strip() or "-"
+        name = player_display_name(record).strip() or "-"
         if mode == "players":
             position = str(record.get("primary_position", "-")).strip() or "-"
             display_name = f"{name[:20]} ({position[:4]})"
@@ -1591,6 +1663,7 @@ def draw_umpire_lineup_block(
             {
                 "slot": str(idx),
                 "name": str(player["name"]),
+                "jersey_number": normalize_jersey_number(player.get("jersey_number", "")),
                 "position": str(player["primary_position"]),
                 "note": str(player.get("notes", "-")),
                 "hand": str(player.get("bats", "-")),
@@ -1600,6 +1673,7 @@ def draw_umpire_lineup_block(
         {
             "slot": "SP",
             "name": str(pitcher_record["name"]),
+            "jersey_number": normalize_jersey_number(pitcher_record.get("jersey_number", "")),
             "position": "SP",
             "note": str(pitcher_record.get("notes", "-")),
             "hand": str(pitcher_record.get("throws", "-")),
@@ -1618,7 +1692,7 @@ def draw_umpire_lineup_block(
             pdf,
             x_num_end + 2,
             y_text,
-            row_data["name"],
+            player_display_name(row_data),
             "Helvetica-Bold",
             max_font_size=name_max_font,
             min_font_size=name_min_font,
@@ -2128,6 +2202,7 @@ def build_blank_official_team_payload(lineup_spots):
         blank_lineup.append(
             {
                 "name": "",
+                "jersey_number": "",
                 "primary_position": "",
                 "bats": "",
                 "throws": "",
@@ -2137,6 +2212,7 @@ def build_blank_official_team_payload(lineup_spots):
 
     blank_pitcher = {
         "name": "",
+        "jersey_number": "",
         "primary_position": "",
         "bats": "",
         "throws": "",
@@ -2166,7 +2242,7 @@ def build_official_hand_groups(records, hand_key, columns):
             else:
                 target_column = "RIGHT-HANDED"
         if target_column in grouped:
-            grouped[target_column].append(str(record.get("name", "")).strip())
+            grouped[target_column].append(player_display_name(record).strip())
 
     for column in grouped:
         grouped[column] = sorted([name for name in grouped[column] if name], key=str.upper)
@@ -2341,7 +2417,7 @@ def draw_official_team_table(
         name_baseline = row_top - pair_h + max(7, (pair_h * 0.40))
         change_baseline = row_top - sub_row_h + max(5, (sub_row_h * 0.26))
         row_label = "P" if idx == len(rows) else str(idx)
-        player_name = truncate_text(row.get("name", "").upper(), 25)
+        player_name = truncate_text(player_display_name(row).upper(), 25)
         player_pos = truncate_text(row.get("primary_position", "").upper(), 4)
         player_change = str(row.get("notes", "")).strip().upper()
         if idx == len(rows):
@@ -2872,7 +2948,7 @@ def lineup_editor(side_key, team_row, roster, lineup_spots):
 
     def player_option(pid):
         p = player_map[int(pid)]
-        return f"{p['name']} ({p['primary_position']} | B:{p['bats']} T:{p['throws']})"
+        return f"{player_display_name(p)} ({p['primary_position']} | B:{p['bats']} T:{p['throws']})"
 
     lineup_ids = []
     team_id = int(team_row["id"])
@@ -2997,7 +3073,7 @@ def lineup_editor(side_key, team_row, roster, lineup_spots):
     substitutions_payload = []
 
     for idx, starter_id in enumerate(lineup_ids, start=1):
-        starter_name = str(player_map[int(starter_id)]["name"])
+        starter_name = player_display_name(player_map[int(starter_id)])
         note_toggle_key = f"{side_key}_{team_id}_note_enabled_{idx}"
         note_enabled = bool(st.session_state.get(note_toggle_key, False))
         note_slot = note_ui_placeholders.get(idx)
@@ -3085,7 +3161,7 @@ def lineup_editor(side_key, team_row, roster, lineup_spots):
 
             used_sub_ids.append(int(sub_player_id))
 
-            sub_name = str(player_map[int(sub_player_id)]["name"])
+            sub_name = player_display_name(player_map[int(sub_player_id)])
             note_parts.append(f"INN {sub_inning}: {sub_name[:12]}")
             substitutions_payload.append(
                 {
@@ -3157,6 +3233,7 @@ def lineup_editor(side_key, team_row, roster, lineup_spots):
             extra_players_records.append(
                 {
                     "name": str(p["name"]),
+                    "jersey_number": normalize_jersey_number(p.get("jersey_number", "")),
                     "primary_position": str(p["primary_position"]),
                     "bats": str(p["bats"]),
                     "throws": str(p["throws"]),
@@ -3258,6 +3335,7 @@ def lineup_editor(side_key, team_row, roster, lineup_spots):
             extra_pitchers_records.append(
                 {
                     "name": str(p["name"]),
+                    "jersey_number": normalize_jersey_number(p.get("jersey_number", "")),
                     "primary_position": str(p["primary_position"]),
                     "bats": str(p["bats"]),
                     "throws": str(p["throws"]),
@@ -3422,6 +3500,18 @@ if menu == "Import Roster":
                 ["throwshand", "throws", "throw"],
                 "throws",
             )
+            jersey_col = find_optional_column(
+                df,
+                [
+                    "jersey_number",
+                    "jerseynumber",
+                    "uniform_number",
+                    "uniformnumber",
+                    "number",
+                    "num",
+                    "#",
+                ],
+            )
         except ValueError as err:
             st.error(str(err))
             st.stop()
@@ -3435,6 +3525,7 @@ if menu == "Import Roster":
                     "position": pos_col,
                     "bats": bats_col,
                     "throws": throws_col,
+                    "jersey_number": jersey_col or "(not found)",
                 }
             )
 
@@ -3465,6 +3556,7 @@ if menu == "Import Roster":
                     "name": str(raw_name).strip(),
                     "org": str(raw_org).strip(),
                     "team": str(raw_team).strip(),
+                    "jersey_number": normalize_jersey_number(row.get(jersey_col, "")) if jersey_col else "",
                     "position": str(row.get(pos_col, "")).strip().upper() or "-",
                     "bats": normalize_hand(row.get(bats_col, "")),
                     "throws": normalize_hand(row.get(throws_col, "")),
@@ -3535,13 +3627,14 @@ if menu == "Import Roster":
                 cursor.execute(
                     """
                     INSERT INTO players
-                    (name, normalized_name, team_id, primary_position, bats, throws)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    (name, normalized_name, team_id, jersey_number, primary_position, bats, throws)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         rec["name"],
                         normalized,
                         team_id,
+                        rec["jersey_number"],
                         rec["position"],
                         rec["bats"],
                         rec["throws"],
@@ -3869,18 +3962,23 @@ if menu == "View Teams":
     team_id = int(selected_team["id"])
     st.markdown("##### Edit Roster")
     with st.form(key=f"add_player_form_{team_id}", clear_on_submit=True):
-        add_col1, add_col2, add_col3, add_col4 = st.columns([0.42, 0.20, 0.19, 0.19], gap="small")
+        add_col1, add_col2, add_col3, add_col4, add_col5 = st.columns(
+            [0.36, 0.12, 0.18, 0.17, 0.17],
+            gap="small",
+        )
         with add_col1:
             new_player_name = st.text_input("Player Name")
         with add_col2:
+            new_player_number = st.text_input("#", max_chars=6)
+        with add_col3:
             new_player_pos = st.selectbox(
                 "Position",
                 options=FIELD_POSITION_OPTIONS,
                 index=FIELD_POSITION_OPTIONS.index("DH"),
             )
-        with add_col3:
-            new_player_bats = st.selectbox("Bats", options=["R", "L", "S"])
         with add_col4:
+            new_player_bats = st.selectbox("Bats", options=["R", "L", "S"])
+        with add_col5:
             new_player_throws = st.selectbox("Throws", options=["R", "L", "S"])
 
         add_submit = st.form_submit_button("Add Player", type="primary", use_container_width=True)
@@ -3888,6 +3986,7 @@ if menu == "View Teams":
             ok, message = add_player_to_team(
                 team_id=team_id,
                 name=new_player_name,
+                jersey_number=new_player_number,
                 primary_position=new_player_pos,
                 bats=new_player_bats,
                 throws=new_player_throws,
@@ -3903,19 +4002,119 @@ if menu == "View Teams":
         st.info("This team has no players yet.")
     else:
         st.markdown("##### Current Roster")
-        roster_table = roster.rename(
+        roster_editor = roster.copy()
+        roster_editor["Select"] = False
+        roster_editor["jersey_number"] = roster_editor["jersey_number"].apply(normalize_jersey_number)
+        roster_editor = roster_editor.rename(
             columns={
+                "id": "ID",
                 "name": "Player",
+                "jersey_number": "#",
                 "primary_position": "Pos",
                 "bats": "B",
                 "throws": "T",
             }
-        )[["Player", "Pos", "B", "T"]]
-        st.dataframe(roster_table, use_container_width=True, hide_index=True)
+        )[["Select", "ID", "Player", "#", "Pos", "B", "T"]]
+        selected_roster_rows = st.data_editor(
+            roster_editor,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            column_config={
+                "Select": st.column_config.CheckboxColumn("Select"),
+                "ID": st.column_config.NumberColumn("ID", disabled=True),
+                "Player": st.column_config.TextColumn("Player", disabled=True),
+                "#": st.column_config.TextColumn("#", disabled=True),
+                "Pos": st.column_config.TextColumn("Pos", disabled=True),
+                "B": st.column_config.TextColumn("B", disabled=True),
+                "T": st.column_config.TextColumn("T", disabled=True),
+            },
+            disabled=["ID", "Player", "#", "Pos", "B", "T"],
+            key=f"roster_editor_{team_id}",
+        )
+
+        selected_player_ids = [
+            int(row["ID"])
+            for _, row in selected_roster_rows.iterrows()
+            if bool(row.get("Select", False))
+        ]
+        if len(selected_player_ids) > 1:
+            st.warning("Select only one player to edit.")
+        elif selected_player_ids:
+            edit_player_id = selected_player_ids[0]
+            selected_player = roster[roster["id"].astype(int) == edit_player_id].iloc[0]
+            st.markdown("##### Edit Selected Player")
+            with st.form(key=f"edit_player_form_{team_id}_{edit_player_id}"):
+                edit_col1, edit_col2, edit_col3, edit_col4, edit_col5 = st.columns(
+                    [0.36, 0.12, 0.18, 0.17, 0.17],
+                    gap="small",
+                )
+                with edit_col1:
+                    edit_player_name = st.text_input(
+                        "Player Name",
+                        value=str(selected_player["name"]),
+                    )
+                with edit_col2:
+                    edit_player_number = st.text_input(
+                        "#",
+                        value=normalize_jersey_number(selected_player.get("jersey_number", "")),
+                        max_chars=6,
+                    )
+                selected_pos = normalize_position_choice(selected_player["primary_position"])
+                if selected_pos not in FIELD_POSITION_OPTIONS:
+                    selected_pos = "DH"
+                with edit_col3:
+                    edit_player_pos = st.selectbox(
+                        "Position",
+                        options=FIELD_POSITION_OPTIONS,
+                        index=FIELD_POSITION_OPTIONS.index(selected_pos),
+                    )
+                selected_bats = normalize_hand(selected_player["bats"])
+                if selected_bats not in ["R", "L", "S"]:
+                    selected_bats = "R"
+                with edit_col4:
+                    edit_player_bats = st.selectbox(
+                        "Bats",
+                        options=["R", "L", "S"],
+                        index=["R", "L", "S"].index(selected_bats),
+                    )
+                selected_throws = normalize_hand(selected_player["throws"])
+                if selected_throws not in ["R", "L", "S"]:
+                    selected_throws = "R"
+                with edit_col5:
+                    edit_player_throws = st.selectbox(
+                        "Throws",
+                        options=["R", "L", "S"],
+                        index=["R", "L", "S"].index(selected_throws),
+                    )
+
+                edit_submit = st.form_submit_button(
+                    "Save Player",
+                    type="primary",
+                    use_container_width=True,
+                )
+                if edit_submit:
+                    ok, message = update_roster_player(
+                        team_id=team_id,
+                        player_id=edit_player_id,
+                        name=edit_player_name,
+                        jersey_number=edit_player_number,
+                        primary_position=edit_player_pos,
+                        bats=edit_player_bats,
+                        throws=edit_player_throws,
+                    )
+                    if ok:
+                        conn.commit()
+                        st.success("Player updated.")
+                        st.session_state[view_team_key] = int(team_id)
+                        st.rerun()
+                    else:
+                        conn.rollback()
+                        st.error(message)
 
         delete_ids = roster["id"].astype(int).tolist()
         delete_map = {
-            int(row["id"]): f"{row['name']} ({row['primary_position']} | B:{row['bats']} T:{row['throws']})"
+            int(row["id"]): f"{player_display_name(row)} ({row['primary_position']} | B:{row['bats']} T:{row['throws']})"
             for _, row in roster.iterrows()
         }
         delete_col1, delete_col2 = st.columns([0.74, 0.26], gap="small")
@@ -3988,12 +4187,12 @@ if menu == "View Teams":
                 st.stop()
 
         usage_counts = get_lineup_usage_counts(int(selected_team["id"]), start_date, end_date)
-        usage_table = roster[["id", "name", "primary_position"]].copy()
+        usage_table = roster[["id", "name", "jersey_number", "primary_position"]].copy()
         usage_table = usage_table.merge(usage_counts, on="id", how="left")
         usage_table["games_selected"] = usage_table["games_selected"].fillna(0).astype(int)
+        usage_table["Player"] = usage_table.apply(player_display_name, axis=1)
         usage_table = usage_table.rename(
             columns={
-                "name": "Player",
                 "primary_position": "Pos",
                 "games_selected": "Games Selected",
             }
@@ -4105,6 +4304,7 @@ if menu == "Create Lineup":
         away_pitcher = away_state["player_map"][away_state["pitcher_id"]]
         away_pitcher_record = {
             "name": str(away_pitcher["name"]),
+            "jersey_number": normalize_jersey_number(away_pitcher.get("jersey_number", "")),
             "primary_position": "SP",
             "bats": str(away_pitcher["bats"]),
             "throws": str(away_pitcher["throws"]),
@@ -4123,6 +4323,7 @@ if menu == "Create Lineup":
         home_pitcher = home_state["player_map"][home_state["pitcher_id"]]
         home_pitcher_record = {
             "name": str(home_pitcher["name"]),
+            "jersey_number": normalize_jersey_number(home_pitcher.get("jersey_number", "")),
             "primary_position": "SP",
             "bats": str(home_pitcher["bats"]),
             "throws": str(home_pitcher["throws"]),
