@@ -1,4 +1,5 @@
 import hashlib
+import base64
 import json
 import os
 import sqlite3
@@ -23,6 +24,7 @@ st.set_page_config(page_title="Lineup Manager", page_icon=":baseball:", layout="
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("LINEUP_DB_PATH", os.path.join(BASE_DIR, "baseball_app.db"))
+DB_BACKEND = "sqlite"
 TEAM_LOGO_UPLOAD_DIR = os.path.join(BASE_DIR, "uploads", "team_logos")
 SUPPORTED_LOGO_EXTENSIONS = {"png", "jpg", "jpeg", "webp", "bmp", "gif"}
 MLB_LOGO_URL = (
@@ -44,10 +46,42 @@ MANAGER_SIGNATURE_FILES = {
 DEFAULT_MANAGER_SIGNATURE_NAME = "Sandy Martinez"
 OFFICIAL_FORM_FONT_CACHE = None
 
+def get_config_value(name, default=None):
+    value = os.environ.get(name)
+    if value:
+        return value
+    try:
+        value = st.secrets.get(name)
+    except Exception:
+        value = None
+    return value or default
+
+
+def connect_database():
+    global DB_BACKEND
+    turso_url = get_config_value("TURSO_DATABASE_URL")
+    turso_token = get_config_value("TURSO_AUTH_TOKEN")
+
+    if turso_url:
+        try:
+            import libsql_experimental as libsql
+        except ImportError:
+            st.error(
+                "TURSO_DATABASE_URL is configured, but libsql-experimental is not installed."
+            )
+            st.stop()
+
+        DB_BACKEND = "turso"
+        return libsql.connect(str(turso_url), auth_token=str(turso_token or ""))
+
+    DB_BACKEND = "sqlite"
+    return sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
+
+
 os.makedirs(TEAM_LOGO_UPLOAD_DIR, exist_ok=True)
 
 
-conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
+conn = connect_database()
 cursor = conn.cursor()
 
 
@@ -540,6 +574,19 @@ def save_uploaded_team_logo(team_id, uploaded_file):
     if not content:
         raise ValueError("The uploaded image file is empty.")
 
+    if DB_BACKEND == "turso":
+        mime_type = {
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "png": "image/png",
+            "webp": "image/webp",
+            "bmp": "image/bmp",
+            "gif": "image/gif",
+        }.get(extension, "application/octet-stream")
+        data_url = f"data:{mime_type};base64,{base64.b64encode(content).decode('ascii')}"
+        set_team_logo(team_id, data_url)
+        return "stored in shared database"
+
     digest = hashlib.sha1(content).hexdigest()[:12]
     filename = f"team_{int(team_id)}_{digest}.{extension}"
     absolute_path = os.path.join(TEAM_LOGO_UPLOAD_DIR, filename)
@@ -794,6 +841,13 @@ def load_logo_reader(logo_url):
     url = str(logo_url).strip() if logo_url else ""
     if not url:
         return None
+
+    data_url_match = re.match(r"^data:image/[^;]+;base64,(.+)$", url, flags=re.IGNORECASE)
+    if data_url_match:
+        try:
+            return ImageReader(BytesIO(base64.b64decode(data_url_match.group(1))))
+        except Exception:
+            return None
 
     if not re.match(r"^https?://", url, flags=re.IGNORECASE):
         local_candidates = [url, os.path.join(BASE_DIR, url)]
