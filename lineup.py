@@ -1,7 +1,9 @@
 import hashlib
+import hmac
 import base64
 import json
 import os
+import secrets as py_secrets
 import sqlite3
 import unicodedata
 import re
@@ -85,7 +87,78 @@ conn = connect_database()
 cursor = conn.cursor()
 
 
+PASSWORD_HASH_ITERATIONS = 260000
+ADMIN_USERNAME = "Admin"
+ADMIN_DEFAULT_PASSWORD = "Nationals2025!"
+
+
+def normalize_username(username):
+    return str(username or "").strip().casefold()
+
+
+def hash_password(password, salt=None):
+    salt = salt or py_secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        str(password).encode("utf-8"),
+        salt.encode("utf-8"),
+        PASSWORD_HASH_ITERATIONS,
+    ).hex()
+    return f"pbkdf2_sha256${PASSWORD_HASH_ITERATIONS}${salt}${digest}"
+
+
+def verify_password(password, stored_hash):
+    try:
+        algorithm, iterations, salt, expected_digest = str(stored_hash).split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            str(password).encode("utf-8"),
+            salt.encode("utf-8"),
+            int(iterations),
+        ).hex()
+        return hmac.compare_digest(digest, expected_digest)
+    except Exception:
+        return False
+
+
+def ensure_default_admin_user():
+    cursor.execute(
+        "SELECT id FROM app_users WHERE username_key=?",
+        (normalize_username(ADMIN_USERNAME),),
+    )
+    if cursor.fetchone():
+        return
+    cursor.execute(
+        """
+        INSERT INTO app_users (username, username_key, password_hash, role)
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            ADMIN_USERNAME,
+            normalize_username(ADMIN_USERNAME),
+            hash_password(ADMIN_DEFAULT_PASSWORD),
+            "admin",
+        ),
+    )
+    conn.commit()
+
+
 def init_db():
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            username_key TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'user',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS organizations (
@@ -164,6 +237,7 @@ def init_db():
         "ON lineup_player_selections(team_id, game_date)"
     )
     conn.commit()
+    ensure_default_admin_user()
 
 
 init_db()
@@ -1409,9 +1483,8 @@ def build_extra_lines(extra_records, no_present_flag, mode):
         return [
             {
                 "text": (
-                    f"{idx}. {player_display_name(p)[:18]} "
-                    f"({str(p.get('primary_position', '-'))[:4]} | "
-                    f"{get_short_hand_code(p.get('bats', '-'), mode='players')})"
+                    f"{idx}. {player_display_name(p)[:20]} "
+                    f"({str(p.get('primary_position', '-'))[:4]})"
                 ),
                 "hand": str(p.get("bats", "-")),
             }
@@ -1499,9 +1572,9 @@ def build_umpire_extra_rows(extra_records, no_present_flag, mode):
         name = player_display_name(record).strip() or "-"
         if mode == "players":
             position = str(record.get("primary_position", "-")).strip() or "-"
-            display_name = f"{name[:20]} ({position[:4]})"
+            display_name = name[:24]
             hand_value = str(record.get("bats", "-")).strip().upper()
-            right = get_short_hand_code(hand_value, mode="players")
+            right = position[:5]
         else:
             display_name = name[:24]
             hand_value = str(record.get("throws", "-")).strip().upper()
@@ -3492,11 +3565,176 @@ def lineup_editor(side_key, team_row, roster, lineup_spots):
     }
 
 
+def get_app_user(username):
+    cursor.execute(
+        """
+        SELECT id, username, username_key, password_hash, role
+        FROM app_users
+        WHERE username_key=?
+        """,
+        (normalize_username(username),),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return {
+        "id": int(row[0]),
+        "username": str(row[1]),
+        "username_key": str(row[2]),
+        "password_hash": str(row[3]),
+        "role": str(row[4]),
+    }
+
+
+def authenticate_user(username, password):
+    user = get_app_user(username)
+    if not user or not verify_password(password, user["password_hash"]):
+        return None
+    return user
+
+
+def require_login():
+    if st.session_state.get("auth_user"):
+        return st.session_state["auth_user"]
+
+    st.markdown(
+        """
+        <div class="hero">
+            <h1>Lineup Manager</h1>
+            <p>Sign in to manage rosters, teams and lineup cards.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    left, middle, right = st.columns([0.32, 0.36, 0.32])
+    with middle:
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Log In", type="primary", use_container_width=True)
+
+        if submitted:
+            user = authenticate_user(username, password)
+            if user:
+                st.session_state["auth_user"] = {
+                    "id": user["id"],
+                    "username": user["username"],
+                    "role": user["role"],
+                }
+                st.rerun()
+            st.error("Invalid username or password.")
+
+    st.stop()
+
+
+def render_account_admin():
+    st.markdown(
+        """
+        <div class="hero">
+            <h1>Manage Accounts</h1>
+            <p>Create and remove users who can sign in to this app.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.form("create_user_form", clear_on_submit=True):
+        st.markdown("#### Add Account")
+        username = st.text_input("New username")
+        password = st.text_input("New password", type="password")
+        confirm_password = st.text_input("Confirm password", type="password")
+        submitted = st.form_submit_button("Create Account", type="primary")
+
+    if submitted:
+        username_clean = str(username).strip()
+        if not username_clean:
+            st.error("Username is required.")
+        elif len(str(password)) < 8:
+            st.error("Password must be at least 8 characters.")
+        elif password != confirm_password:
+            st.error("Passwords do not match.")
+        elif get_app_user(username_clean):
+            st.error("That username already exists.")
+        else:
+            cursor.execute(
+                """
+                INSERT INTO app_users (username, username_key, password_hash, role)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    username_clean,
+                    normalize_username(username_clean),
+                    hash_password(password),
+                    "user",
+                ),
+            )
+            conn.commit()
+            st.success(f"Account created for {username_clean}.")
+
+    st.markdown("#### Existing Accounts")
+    users_df = pd.read_sql(
+        """
+        SELECT id, username AS Username, role AS Role, created_at AS Created
+        FROM app_users
+        ORDER BY role DESC, username COLLATE NOCASE
+        """,
+        conn,
+    )
+    st.dataframe(users_df.drop(columns=["id"]), use_container_width=True, hide_index=True)
+
+    deletable_users = users_df[
+        users_df["Username"].str.casefold() != normalize_username(ADMIN_USERNAME)
+    ].copy()
+    if deletable_users.empty:
+        st.info("No removable accounts yet. The Admin account is protected.")
+        return
+
+    account_options = deletable_users["id"].astype(int).tolist()
+    selected_id = st.selectbox(
+        "Account to delete",
+        options=account_options,
+        format_func=lambda user_id: str(
+            deletable_users.loc[deletable_users["id"] == user_id, "Username"].iloc[0]
+        ),
+    )
+    selected_username = str(
+        deletable_users.loc[deletable_users["id"] == selected_id, "Username"].iloc[0]
+    )
+    confirm_delete = st.checkbox(f"Confirm delete account {selected_username}")
+    if st.button("Delete Account", disabled=not confirm_delete):
+        cursor.execute(
+            "DELETE FROM app_users WHERE id=? AND username_key<>?",
+            (int(selected_id), normalize_username(ADMIN_USERNAME)),
+        )
+        conn.commit()
+        st.success(f"Deleted account {selected_username}.")
+        st.rerun()
+
+
+auth_user = require_login()
+if not auth_user:
+    st.stop()
+
 st.sidebar.markdown("## Lineup Manager")
-menu = st.sidebar.radio(
-    "Menu",
-    ["Import Roster", "Import Logos", "View Teams", "Create Lineup"],
-)
+st.sidebar.caption(f"Signed in as {auth_user['username']}")
+if DB_BACKEND == "turso":
+    st.sidebar.success("Shared online database active")
+else:
+    st.sidebar.warning("Local database active")
+if st.sidebar.button("Log Out", use_container_width=True):
+    st.session_state.pop("auth_user", None)
+    st.rerun()
+
+menu_options = ["Import Roster", "Import Logos", "View Teams", "Create Lineup"]
+if auth_user.get("role") == "admin":
+    menu_options.append("Manage Accounts")
+
+menu = st.sidebar.radio("Menu", menu_options)
+
+
+if menu == "Manage Accounts":
+    render_account_admin()
 
 
 if menu == "Import Roster":

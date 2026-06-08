@@ -37,8 +37,11 @@ python scripts/migrate_sqlite_to_turso.py
 ```
 
 Con esos secretos activos, la app publicada ya no escribe en el SQLite temporal de
-Streamlit: todos los imports, ediciones de roster, lineups guardados, conteos de uso
-y logos subidos desde la pagina se guardan en la base compartida.
+Streamlit: las cuentas, imports, ediciones de roster, lineups guardados, conteos de uso
+y logos subidos desde la pagina se guardan en la base compartida. La barra lateral
+muestra `Shared online database active` cuando la app esta conectada a Turso; si muestra
+`Local database active`, los cambios solo se estan guardando en `baseball_app.db` de esa
+maquina.
 
 ## Publicar en GitHub y Streamlit Community Cloud
 

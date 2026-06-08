@@ -11,6 +11,7 @@ TURSO_DATABASE_URL = os.environ["TURSO_DATABASE_URL"]
 TURSO_AUTH_TOKEN = os.environ.get("TURSO_AUTH_TOKEN", "")
 
 TABLES = [
+    "app_users",
     "organizations",
     "teams",
     "players",
@@ -26,6 +27,18 @@ def rows_for_table(source_conn, table):
 
 
 def create_schema(target):
+    target.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            username_key TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'user',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
     target.execute(
         """
         CREATE TABLE IF NOT EXISTS organizations (
