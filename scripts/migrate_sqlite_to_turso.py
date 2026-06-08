@@ -2,7 +2,7 @@ import os
 import sqlite3
 from pathlib import Path
 
-import libsql_experimental as libsql
+import libsql
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]

@@ -10,7 +10,7 @@ import re
 from io import BytesIO
 from datetime import datetime, timedelta
 from urllib.request import urlopen
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import pandas as pd
 import streamlit as st
@@ -65,11 +65,23 @@ def connect_database():
     turso_token = get_config_value("TURSO_AUTH_TOKEN")
 
     if turso_url:
+        parsed_turso_url = urlparse(str(turso_url))
+        if (
+            "tu-base" in str(turso_url).lower()
+            or parsed_turso_url.scheme not in {"libsql", "https", "http"}
+            or not parsed_turso_url.netloc
+        ):
+            st.error(
+                "TURSO_DATABASE_URL is not a valid Turso/libSQL URL. "
+                "Update the app Secrets with the real database URL from Turso."
+            )
+            st.stop()
+
         try:
-            import libsql_experimental as libsql
+            import libsql
         except ImportError:
             st.error(
-                "TURSO_DATABASE_URL is configured, but libsql-experimental is not installed."
+                "TURSO_DATABASE_URL is configured, but libsql is not installed."
             )
             st.stop()
 
@@ -240,7 +252,15 @@ def init_db():
     ensure_default_admin_user()
 
 
-init_db()
+try:
+    init_db()
+except Exception as err:
+    st.error(
+        "The app could not connect to or initialize the database. "
+        "Check TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in Streamlit Secrets."
+    )
+    st.code(str(err))
+    st.stop()
 
 
 def inject_styles():
