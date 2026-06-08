@@ -1,5 +1,5 @@
 streamlit==1.54.0
-pandas==2.3.2
+pandas==2.3.3
 reportlab==4.4.10
 Pillow==11.3.0
 libsql==0.1.11
