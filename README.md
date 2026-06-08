@@ -48,8 +48,9 @@ maquina.
 1. Sube este proyecto completo a un repositorio de GitHub.
 2. En Streamlit Community Cloud crea una nueva app desde ese repositorio.
 3. Usa `streamlit_app.py` como `Main file path`.
-4. Para persistencia compartida, define `TURSO_DATABASE_URL` y `TURSO_AUTH_TOKEN` en Secrets.
-5. Si en el futuro quieres mover la base local a otra ruta, define la variable de entorno `LINEUP_DB_PATH`.
+4. En `Advanced settings`, selecciona Python `3.12`.
+5. Para persistencia compartida, define `TURSO_DATABASE_URL` y `TURSO_AUTH_TOKEN` en Secrets.
+6. Si en el futuro quieres mover la base local a otra ruta, define la variable de entorno `LINEUP_DB_PATH`.
 
 ## Nota sobre datos
 
