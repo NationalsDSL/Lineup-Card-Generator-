@@ -27,6 +27,7 @@ st.set_page_config(page_title="Lineup Manager", page_icon=":baseball:", layout="
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("LINEUP_DB_PATH", os.path.join(BASE_DIR, "baseball_app.db"))
 DB_BACKEND = "sqlite"
+DB_BACKEND_MESSAGE = ""
 TEAM_LOGO_UPLOAD_DIR = os.path.join(BASE_DIR, "uploads", "team_logos")
 SUPPORTED_LOGO_EXTENSIONS = {"png", "jpg", "jpeg", "webp", "bmp", "gif"}
 MLB_LOGO_URL = (
@@ -60,9 +61,15 @@ def get_config_value(name, default=None):
 
 
 def connect_database():
-    global DB_BACKEND
+    global DB_BACKEND, DB_BACKEND_MESSAGE
     turso_url = get_config_value("TURSO_DATABASE_URL")
     turso_token = get_config_value("TURSO_AUTH_TOKEN")
+
+    def connect_sqlite_with_message(message=""):
+        global DB_BACKEND, DB_BACKEND_MESSAGE
+        DB_BACKEND = "sqlite"
+        DB_BACKEND_MESSAGE = message
+        return sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
 
     if turso_url:
         parsed_turso_url = urlparse(str(turso_url))
@@ -71,25 +78,27 @@ def connect_database():
             or parsed_turso_url.scheme not in {"libsql", "https", "http"}
             or not parsed_turso_url.netloc
         ):
-            st.error(
-                "TURSO_DATABASE_URL is not a valid Turso/libSQL URL. "
-                "Update the app Secrets with the real database URL from Turso."
+            return connect_sqlite_with_message(
+                "TURSO_DATABASE_URL is invalid, so the app is using the local database."
             )
-            st.stop()
 
         try:
             import libsql
         except ImportError:
-            st.error(
-                "TURSO_DATABASE_URL is configured, but libsql is not installed."
+            return connect_sqlite_with_message(
+                "libsql is not installed, so the app is using the local database."
             )
-            st.stop()
 
-        DB_BACKEND = "turso"
-        return libsql.connect(str(turso_url), auth_token=str(turso_token or ""))
+        try:
+            DB_BACKEND = "turso"
+            DB_BACKEND_MESSAGE = ""
+            return libsql.connect(str(turso_url), auth_token=str(turso_token or ""))
+        except Exception as err:
+            return connect_sqlite_with_message(
+                f"Turso connection failed, so the app is using the local database. {err}"
+            )
 
-    DB_BACKEND = "sqlite"
-    return sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
+    return connect_sqlite_with_message()
 
 
 os.makedirs(TEAM_LOGO_UPLOAD_DIR, exist_ok=True)
@@ -255,12 +264,28 @@ def init_db():
 try:
     init_db()
 except Exception as err:
-    st.error(
-        "The app could not connect to or initialize the database. "
-        "Check TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in Streamlit Secrets."
-    )
-    st.code(str(err))
-    st.stop()
+    if DB_BACKEND == "turso":
+        DB_BACKEND = "sqlite"
+        DB_BACKEND_MESSAGE = (
+            "Shared Turso database failed during startup, so the app is using "
+            f"the local database. {err}"
+        )
+        try:
+            conn.close()
+        except Exception:
+            pass
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
+        cursor = conn.cursor()
+        try:
+            init_db()
+        except Exception as sqlite_err:
+            st.error("The app could not initialize the local database.")
+            st.code(str(sqlite_err))
+            st.stop()
+    else:
+        st.error("The app could not initialize the database.")
+        st.code(str(err))
+        st.stop()
 
 
 def inject_styles():
@@ -3742,6 +3767,8 @@ if DB_BACKEND == "turso":
     st.sidebar.success("Shared online database active")
 else:
     st.sidebar.warning("Local database active")
+    if DB_BACKEND_MESSAGE:
+        st.sidebar.caption(DB_BACKEND_MESSAGE[:240])
 if st.sidebar.button("Log Out", use_container_width=True):
     st.session_state.pop("auth_user", None)
     st.rerun()
