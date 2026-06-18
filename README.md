@@ -57,3 +57,7 @@ maquina.
 La app usa SQLite local si no encuentra secretos de Turso. En Streamlit Community Cloud
 el sistema de archivos no debe considerarse persistente a largo plazo, asi que para
 produccion conviene activar Turso/libSQL.
+
+Si la base compartida no esta activa, cada usuario puede entrar a `My Data`, descargar
+un backup `.db` despues de modificar rosters/equipos/jugadores, y volver a subir ese
+archivo despues para restaurar sus cambios.

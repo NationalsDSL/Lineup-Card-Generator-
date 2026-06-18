@@ -5,6 +5,7 @@ import json
 import os
 import secrets as py_secrets
 import sqlite3
+import tempfile
 import unicodedata
 import re
 from io import BytesIO
@@ -286,6 +287,94 @@ except Exception as err:
         st.error("The app could not initialize the database.")
         st.code(str(err))
         st.stop()
+
+
+LOCAL_BACKUP_REQUIRED_TABLES = {
+    "app_users",
+    "organizations",
+    "teams",
+    "players",
+    "saved_team_lineups",
+    "lineup_player_selections",
+}
+
+
+def create_local_database_backup_bytes():
+    if DB_BACKEND != "sqlite":
+        return None
+
+    conn.commit()
+    backup_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as tmp:
+            backup_path = tmp.name
+
+        backup_conn = sqlite3.connect(backup_path)
+        try:
+            conn.backup(backup_conn)
+        finally:
+            backup_conn.close()
+
+        with open(backup_path, "rb") as backup_file:
+            return backup_file.read()
+    finally:
+        if backup_path and os.path.exists(backup_path):
+            try:
+                os.remove(backup_path)
+            except OSError:
+                pass
+
+
+def validate_local_database_backup(path):
+    backup_conn = sqlite3.connect(path)
+    try:
+        rows = backup_conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+        table_names = {str(row[0]) for row in rows}
+    finally:
+        backup_conn.close()
+
+    missing_tables = sorted(LOCAL_BACKUP_REQUIRED_TABLES - table_names)
+    if missing_tables:
+        return False, f"Backup is missing tables: {', '.join(missing_tables)}"
+    return True, ""
+
+
+def restore_local_database_backup(uploaded_file):
+    global conn, cursor, DB_BACKEND, DB_BACKEND_MESSAGE
+
+    restore_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as tmp:
+            restore_path = tmp.name
+            tmp.write(uploaded_file.getvalue())
+
+        valid, message = validate_local_database_backup(restore_path)
+        if not valid:
+            return False, message
+
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+        os.replace(restore_path, DB_PATH)
+        restore_path = ""
+        DB_BACKEND = "sqlite"
+        DB_BACKEND_MESSAGE = "Restored from a local backup file."
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
+        cursor = conn.cursor()
+        init_db()
+        return True, "Backup restored."
+    except Exception as err:
+        return False, str(err)
+    finally:
+        if restore_path and os.path.exists(restore_path):
+            try:
+                os.remove(restore_path)
+            except OSError:
+                pass
 
 
 def inject_styles():
@@ -3757,6 +3846,63 @@ def render_account_admin():
         st.rerun()
 
 
+def render_my_data_tools():
+    st.markdown(
+        """
+        <div class="hero">
+            <h1>My Data</h1>
+            <p>Keep a personal backup of roster, team, player and lineup changes.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if DB_BACKEND == "turso":
+        st.success("Shared online database is active. Your changes are saved online.")
+        return
+
+    st.warning(
+        "Shared online database is not active. Download a backup after making changes, "
+        "then upload that backup later to restore your data."
+    )
+
+    backup_bytes = create_local_database_backup_bytes()
+    if backup_bytes:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        st.download_button(
+            "Download My Data Backup",
+            data=backup_bytes,
+            file_name=f"lineup_manager_backup_{timestamp}.db",
+            mime="application/octet-stream",
+            type="primary",
+            use_container_width=True,
+        )
+    else:
+        st.error("Could not create a local backup right now.")
+
+    st.markdown("#### Restore Backup")
+    uploaded_backup = st.file_uploader(
+        "Upload a previous backup file",
+        type=["db", "sqlite", "sqlite3"],
+        key="local_database_backup_upload",
+    )
+    confirm_restore = st.checkbox(
+        "Replace the current local app data with this backup",
+        disabled=uploaded_backup is None,
+    )
+    if st.button(
+        "Restore Backup",
+        disabled=(uploaded_backup is None or not confirm_restore),
+        use_container_width=True,
+    ):
+        ok, message = restore_local_database_backup(uploaded_backup)
+        if ok:
+            st.success(message)
+            st.rerun()
+        else:
+            st.error(f"Could not restore backup: {message}")
+
+
 auth_user = require_login()
 if not auth_user:
     st.stop()
@@ -3773,7 +3919,7 @@ if st.sidebar.button("Log Out", use_container_width=True):
     st.session_state.pop("auth_user", None)
     st.rerun()
 
-menu_options = ["Import Roster", "Import Logos", "View Teams", "Create Lineup"]
+menu_options = ["Import Roster", "Import Logos", "View Teams", "Create Lineup", "My Data"]
 if auth_user.get("role") == "admin":
     menu_options.append("Manage Accounts")
 
@@ -3782,6 +3928,10 @@ menu = st.sidebar.radio("Menu", menu_options)
 
 if menu == "Manage Accounts":
     render_account_admin()
+
+
+if menu == "My Data":
+    render_my_data_tools()
 
 
 if menu == "Import Roster":
