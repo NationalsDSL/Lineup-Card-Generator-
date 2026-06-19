@@ -346,7 +346,9 @@ def restore_local_database_backup(uploaded_file):
 
     restore_path = ""
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as tmp:
+        db_dir = os.path.dirname(os.path.abspath(DB_PATH)) or BASE_DIR
+        os.makedirs(db_dir, exist_ok=True)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".db", dir=db_dir) as tmp:
             restore_path = tmp.name
             tmp.write(uploaded_file.getvalue())
 
