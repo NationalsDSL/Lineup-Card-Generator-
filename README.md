@@ -18,6 +18,11 @@ streamlit run streamlit_app.py
 
 ## Base compartida para Streamlit Cloud
 
+> **Aviso temporal:** el controlador nativo `libsql` fue retirado de
+> `requirements.txt` porque provoca un `segmentation fault` en Streamlit Community
+> Cloud. Hasta incorporar un cliente compatible, el despliegue usa SQLite local
+> aunque existan secretos de Turso configurados.
+
 Por defecto la app usa `baseball_app.db`, que sirve bien para trabajar localmente.
 Para que los cambios hechos por cualquier usuario en la app publicada queden guardados
 y sean visibles para todo el mundo, configura una base Turso/libSQL y agrega estos

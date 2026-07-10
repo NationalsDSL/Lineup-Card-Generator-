@@ -65,6 +65,9 @@ def connect_database():
     global DB_BACKEND, DB_BACKEND_MESSAGE
     turso_url = get_config_value("TURSO_DATABASE_URL")
     turso_token = get_config_value("TURSO_AUTH_TOKEN")
+    enable_native_turso = str(
+        get_config_value("ENABLE_TURSO_NATIVE_DRIVER", "")
+    ).strip().lower() in {"1", "true", "yes", "on"}
 
     def connect_sqlite_with_message(message=""):
         global DB_BACKEND, DB_BACKEND_MESSAGE
@@ -73,6 +76,12 @@ def connect_database():
         return sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
 
     if turso_url:
+        if not enable_native_turso:
+            return connect_sqlite_with_message(
+                "The native Turso driver is disabled because it is unstable on "
+                "Streamlit Community Cloud, so the app is using the local database."
+            )
+
         parsed_turso_url = urlparse(str(turso_url))
         if (
             "tu-base" in str(turso_url).lower()
